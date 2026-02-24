@@ -18,7 +18,11 @@ This skill sends uncommitted changes to Codex CLI for **review only**. Codex rea
 
 ## Codex Runner Script
 
-This skill uses `codex-runner.sh` to handle all Codex CLI execution. The script runs foreground, manages polling/extraction/cleanup internally, and outputs structured results.
+This skill uses `codex-runner.sh` with `start`/`poll`/`stop` subcommands to run Codex CLI in the background and report progress incrementally.
+
+- **`start`** — launches Codex as a detached background process, returns immediately with a state directory path
+- **`poll`** — checks progress, outputs plain text status on stdout and progress events on stderr
+- **`stop`** — kills processes and cleans up the state directory
 
 ### Bootstrap Logic (inline in every Bash call)
 
@@ -28,9 +32,9 @@ Every Bash call that invokes the runner must include this resolve block at the t
 RUNNER="${CODEX_RUNNER:-$HOME/.local/bin/codex-runner.sh}"
 NEED_INSTALL=0
 if [ -n "$CODEX_RUNNER" ] && test -x "$CODEX_RUNNER"; then
-  if ! grep -q 'CODEX_RUNNER_VERSION="1"' "$CODEX_RUNNER" 2>/dev/null; then NEED_INSTALL=1; fi
+  if ! grep -q 'CODEX_RUNNER_VERSION="4"' "$CODEX_RUNNER" 2>/dev/null; then NEED_INSTALL=1; fi
 elif ! test -x "$RUNNER"; then NEED_INSTALL=1
-elif ! grep -q 'CODEX_RUNNER_VERSION="1"' "$RUNNER" 2>/dev/null; then NEED_INSTALL=1
+elif ! grep -q 'CODEX_RUNNER_VERSION="4"' "$RUNNER" 2>/dev/null; then NEED_INSTALL=1
 fi
 if [ "$NEED_INSTALL" = 1 ]; then
   mkdir -p "$HOME/.local/bin"
@@ -52,14 +56,9 @@ set -euo pipefail
 
 # IMPORTANT: Bump CODEX_RUNNER_VERSION when changing this script.
 # embed-runner.sh checks this version string across all embed locations.
-CODEX_RUNNER_VERSION="1"
+CODEX_RUNNER_VERSION="4"
 
-WORKING_DIR=""
-EFFORT="high"
-THREAD_ID=""
-TIMEOUT=540
-POLL_INTERVAL=15
-
+# --- Exit codes ---
 EXIT_SUCCESS=0
 EXIT_ERROR=1
 EXIT_TIMEOUT=2
@@ -67,130 +66,803 @@ EXIT_TURN_FAILED=3
 EXIT_STALLED=4
 EXIT_CODEX_NOT_FOUND=5
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --mode) shift 2 ;;  # accepted but ignored for backwards compatibility
-    --working-dir) WORKING_DIR="$2"; shift 2 ;;
-    --effort) EFFORT="$2"; shift 2 ;;
-    --thread-id) THREAD_ID="$2"; shift 2 ;;
-    --timeout) TIMEOUT="$2"; shift 2 ;;
-    --poll-interval) POLL_INTERVAL="$2"; shift 2 ;;
-    --version) echo "codex-runner $CODEX_RUNNER_VERSION"; exit 0 ;;
-    *) echo "Unknown option: $1" >&2; exit $EXIT_ERROR ;;
-  esac
-done
+# --- Subcommand dispatch ---
+case "${1:-}" in
+  start) shift; do_start=1 ;;
+  poll)  shift; do_poll=1 ;;
+  stop)  shift; do_stop=1 ;;
+  *)     do_legacy=1 ;;
+esac
 
-if [[ -z "$WORKING_DIR" ]]; then echo "Error: --working-dir is required" >&2; exit $EXIT_ERROR; fi
-if ! command -v codex &>/dev/null; then echo "Error: codex CLI not found in PATH" >&2; exit $EXIT_CODEX_NOT_FOUND; fi
+# ============================================================
+# SUBCOMMAND: start
+# ============================================================
+if [[ "${do_start:-}" == 1 ]]; then
 
-PROMPT=$(cat)
-if [[ -z "$PROMPT" ]]; then echo "Error: no prompt provided on stdin" >&2; exit $EXIT_ERROR; fi
+  # --- Defaults ---
+  WORKING_DIR=""
+  EFFORT="high"
+  THREAD_ID=""
+  TIMEOUT=540
 
-RUN_ID="$(date +%s)-$$"
-JSONL_FILE="/tmp/codex-runner-${RUN_ID}.jsonl"
-ERR_FILE="/tmp/codex-runner-${RUN_ID}.err"
+  # --- Parse arguments ---
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --working-dir) WORKING_DIR="$2"; shift 2 ;;
+      --effort) EFFORT="$2"; shift 2 ;;
+      --thread-id) THREAD_ID="$2"; shift 2 ;;
+      --timeout) TIMEOUT="$2"; shift 2 ;;
+      --version) echo "codex-runner $CODEX_RUNNER_VERSION"; exit 0 ;;
+      *) echo "Unknown option: $1" >&2; exit $EXIT_ERROR ;;
+    esac
+  done
 
-cleanup() {
-  local codex_pid_local="${CODEX_PID:-}"
-  if [[ -n "$codex_pid_local" ]] && kill -0 "$codex_pid_local" 2>/dev/null; then
-    kill "$codex_pid_local" 2>/dev/null || true
-    wait "$codex_pid_local" 2>/dev/null || true
+  # --- Validate ---
+  if [[ -z "$WORKING_DIR" ]]; then
+    echo "Error: --working-dir is required" >&2
+    exit $EXIT_ERROR
   fi
-  rm -f "$JSONL_FILE" "$ERR_FILE"
-}
-trap cleanup EXIT
+  if ! command -v codex &>/dev/null; then
+    echo "Error: codex CLI not found in PATH" >&2
+    exit $EXIT_CODEX_NOT_FOUND
+  fi
 
-CODEX_PID=""
-if [[ -n "$THREAD_ID" ]]; then
-  # Resume mode: codex exec resume does not support --sandbox or -C flags.
-  # The sandbox setting from the initial session is preserved automatically.
-  cd "$WORKING_DIR"
-  echo "$PROMPT" | codex exec --skip-git-repo-check --json resume "$THREAD_ID" > "$JSONL_FILE" 2>"$ERR_FILE" &
-  CODEX_PID=$!
-else
-  echo "$PROMPT" | codex exec --skip-git-repo-check --json --sandbox read-only --config model_reasoning_effort="$EFFORT" -C "$WORKING_DIR" > "$JSONL_FILE" 2>"$ERR_FILE" &
-  CODEX_PID=$!
+  # --- Canonicalize WORKING_DIR ---
+  WORKING_DIR_REAL=$(realpath "$WORKING_DIR")
+  WORKING_DIR="$WORKING_DIR_REAL"
+
+  # --- Read prompt from stdin ---
+  PROMPT=$(cat)
+  if [[ -z "$PROMPT" ]]; then
+    echo "Error: no prompt provided on stdin" >&2
+    exit $EXIT_ERROR
+  fi
+
+  # --- Create state directory ---
+  RUN_ID="$(date +%s)-$$"
+  STATE_DIR="${WORKING_DIR}/.codex-review/runs/${RUN_ID}"
+  mkdir -p "$STATE_DIR"
+
+  # Write prompt to file
+  printf '%s' "$PROMPT" > "$STATE_DIR/prompt.txt"
+
+  # --- Startup rollback trap ---
+  # If anything fails before state.json is committed, clean up everything
+  startup_cleanup() {
+    local pgid="${CODEX_PGID:-}"
+    if [[ -n "$pgid" ]]; then
+      kill -TERM -"$pgid" 2>/dev/null || true
+    fi
+    local wpid="${WATCHDOG_PID:-}"
+    if [[ -n "$wpid" ]] && kill -0 "$wpid" 2>/dev/null; then
+      kill "$wpid" 2>/dev/null || true
+    fi
+    rm -rf "$STATE_DIR"
+  }
+  trap startup_cleanup EXIT
+
+  # --- Detach Codex process via Python3 launcher ---
+  LAUNCH_RESULT=$(python3 -c "
+import os, sys, json, subprocess
+
+state_dir = sys.argv[1]
+working_dir = sys.argv[2]
+timeout_s = int(sys.argv[3])
+thread_id = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] else ''
+effort = sys.argv[5] if len(sys.argv) > 5 else 'high'
+
+prompt_file = os.path.join(state_dir, 'prompt.txt')
+jsonl_file = os.path.join(state_dir, 'output.jsonl')
+err_file = os.path.join(state_dir, 'error.log')
+
+if thread_id:
+    cmd = ['codex', 'exec', '--skip-git-repo-check', '--json', 'resume', thread_id]
+    cwd = working_dir
+else:
+    cmd = ['codex', 'exec', '--skip-git-repo-check', '--json',
+           '--sandbox', 'read-only',
+           '--config', 'model_reasoning_effort=' + effort,
+           '-C', working_dir]
+    cwd = None
+
+with open(prompt_file) as fin, open(jsonl_file, 'w') as fout, open(err_file, 'w') as ferr:
+    p = subprocess.Popen(cmd, stdin=fin, stdout=fout, stderr=ferr,
+                         cwd=cwd, start_new_session=True)
+
+print(json.dumps({'pid': p.pid, 'pgid': p.pid}))
+" "$STATE_DIR" "$WORKING_DIR" "$TIMEOUT" "$THREAD_ID" "$EFFORT")
+
+  CODEX_PID=$(echo "$LAUNCH_RESULT" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['pid'])")
+  CODEX_PGID=$(echo "$LAUNCH_RESULT" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['pgid'])")
+
+  # --- Watchdog timeout (detached) ---
+  python3 -c "
+import os, signal, time, sys
+os.setsid()
+time.sleep(int(sys.argv[1]))
+try:
+    os.killpg(int(sys.argv[2]), signal.SIGTERM)
+except ProcessLookupError:
+    pass
+" "$TIMEOUT" "$CODEX_PGID" &
+  WATCHDOG_PID=$!
+  disown $WATCHDOG_PID 2>/dev/null || true
+
+  # --- Verify process is alive ---
+  sleep 1
+  if ! kill -0 "$CODEX_PID" 2>/dev/null; then
+    echo "Error: Codex process died immediately after launch" >&2
+    # startup_cleanup trap will handle the rest
+    exit $EXIT_ERROR
+  fi
+
+  # --- Write state.json (atomic: tmp -> mv) ---
+  NOW=$(date +%s)
+  STATE_TMP=$(mktemp "$STATE_DIR/state.json.XXXXXX")
+  python3 -c "
+import json, sys
+data = {
+    'pid': int(sys.argv[1]),
+    'pgid': int(sys.argv[2]),
+    'watchdog_pid': int(sys.argv[3]),
+    'run_id': sys.argv[4],
+    'state_dir': sys.argv[5],
+    'working_dir': sys.argv[6],
+    'effort': sys.argv[7],
+    'timeout': int(sys.argv[8]),
+    'started_at': int(sys.argv[9]),
+    'thread_id': sys.argv[10],
+    'last_line_count': 0,
+    'stall_count': 0,
+    'last_poll_at': 0
+}
+with open(sys.argv[11], 'w') as f:
+    json.dump(data, f, indent=2)
+" "$CODEX_PID" "$CODEX_PGID" "$WATCHDOG_PID" "$RUN_ID" "$STATE_DIR" "$WORKING_DIR" "$EFFORT" "$TIMEOUT" "$NOW" "$THREAD_ID" "$STATE_TMP"
+  mv "$STATE_TMP" "$STATE_DIR/state.json"
+
+  # --- State committed: remove startup trap ---
+  trap - EXIT
+
+  # --- Output result ---
+  echo "CODEX_STARTED:${STATE_DIR}"
+  exit $EXIT_SUCCESS
 fi
 
-ELAPSED=0
-STALL_COUNT=0
-LAST_LINE_COUNT=0
+# ============================================================
+# SUBCOMMAND: poll
+# ============================================================
+if [[ "${do_poll:-}" == 1 ]]; then
 
-while true; do
-  sleep "$POLL_INTERVAL"
-  ELAPSED=$((ELAPSED + POLL_INTERVAL))
-  if [[ $ELAPSED -ge $TIMEOUT ]]; then
-    echo "Error: timeout after ${TIMEOUT}s" >&2
-    kill "$CODEX_PID" 2>/dev/null || true
-    exit $EXIT_TIMEOUT
+  STATE_DIR="${1:-}"
+  if [[ -z "$STATE_DIR" ]]; then
+    echo "POLL:failed:0s:1:Invalid or missing state directory"
+    exit $EXIT_ERROR
   fi
+
+  # Validate STATE_DIR: realpath + directory exists + state.json + reconstruct from working_dir+run_id
+  STATE_DIR_REAL=$(realpath "$STATE_DIR" 2>/dev/null || true)
+  if [[ -z "$STATE_DIR_REAL" || ! -d "$STATE_DIR_REAL" ]]; then
+    echo "POLL:failed:0s:1:Invalid or missing state directory"
+    exit $EXIT_ERROR
+  fi
+  STATE_DIR="$STATE_DIR_REAL"
+
+  # --- Check for cached final result (idempotent) ---
+  if [[ -f "$STATE_DIR/final.txt" ]]; then
+    cat "$STATE_DIR/final.txt"
+    # Also replay review.txt existence info on stderr
+    if [[ -f "$STATE_DIR/review.txt" ]]; then
+      echo "[cached] Review available in $STATE_DIR/review.txt" >&2
+    fi
+    exit $EXIT_SUCCESS
+  fi
+
+  # --- Read state ---
+  if [[ ! -f "$STATE_DIR/state.json" ]]; then
+    echo "POLL:failed:0s:1:state.json not found"
+    exit $EXIT_ERROR
+  fi
+
+  # Reconstruct expected path from state.json and compare
+  VALIDATE_RESULT=$(python3 -c "
+import sys, json, os
+with open(sys.argv[1]) as f:
+    s = json.load(f)
+wd = os.path.realpath(s.get('working_dir', ''))
+rid = s.get('run_id', '')
+expected = os.path.join(wd, '.codex-review', 'runs', rid)
+actual = os.path.realpath(sys.argv[2])
+print('OK' if expected == actual else 'MISMATCH')
+" "$STATE_DIR/state.json" "$STATE_DIR" 2>/dev/null || echo "ERROR")
+
+  if [[ "$VALIDATE_RESULT" == "MISMATCH" ]]; then
+    # Fallback: check old /tmp format for migration
+    if [[ "$STATE_DIR_REAL" =~ ^(/tmp|/private/tmp)/codex-runner-[0-9]+-[0-9]+$ ]]; then
+      echo "[migration] Accepting legacy /tmp state directory" >&2
+    else
+      echo "POLL:failed:0s:1:state directory path mismatch"
+      exit $EXIT_ERROR
+    fi
+  elif [[ "$VALIDATE_RESULT" != "OK" ]]; then
+    echo "POLL:failed:0s:1:state.json validation error"
+    exit $EXIT_ERROR
+  fi
+
+  # Parse state.json with python3
+  STATE_VALS=$(python3 -c "
+import sys, json
+with open(sys.argv[1]) as f:
+    s = json.load(f)
+print(s['pid'])
+print(s['pgid'])
+print(s.get('watchdog_pid', ''))
+print(s['timeout'])
+print(s['started_at'])
+print(s['last_line_count'])
+print(s['stall_count'])
+print(s.get('thread_id', ''))
+" "$STATE_DIR/state.json")
+
+  CODEX_PID=$(echo "$STATE_VALS" | sed -n '1p')
+  CODEX_PGID=$(echo "$STATE_VALS" | sed -n '2p')
+  WATCHDOG_PID=$(echo "$STATE_VALS" | sed -n '3p')
+  TIMEOUT=$(echo "$STATE_VALS" | sed -n '4p')
+  STARTED_AT=$(echo "$STATE_VALS" | sed -n '5p')
+  LAST_LINE_COUNT=$(echo "$STATE_VALS" | sed -n '6p')
+  STALL_COUNT=$(echo "$STATE_VALS" | sed -n '7p')
+  THREAD_ID=$(echo "$STATE_VALS" | sed -n '8p')
+
+  JSONL_FILE="$STATE_DIR/output.jsonl"
+  ERR_FILE="$STATE_DIR/error.log"
+  NOW=$(date +%s)
+  ELAPSED=$((NOW - STARTED_AT))
+
+  # --- Check if PID is alive ---
+  PROCESS_ALIVE=1
   if ! kill -0 "$CODEX_PID" 2>/dev/null; then
-    wait "$CODEX_PID" 2>/dev/null || true
-    CODEX_PID=""
-    break
+    PROCESS_ALIVE=0
   fi
+
+  # --- Count lines ---
+  CURRENT_LINE_COUNT=0
   if [[ -f "$JSONL_FILE" ]]; then
     CURRENT_LINE_COUNT=$(wc -l < "$JSONL_FILE" 2>/dev/null || echo 0)
     CURRENT_LINE_COUNT=$(echo "$CURRENT_LINE_COUNT" | tr -d ' ')
-  else
-    CURRENT_LINE_COUNT=0
   fi
+
+  # --- Stall detection ---
+  NEW_STALL_COUNT=$STALL_COUNT
   if [[ "$CURRENT_LINE_COUNT" -eq "$LAST_LINE_COUNT" ]]; then
-    STALL_COUNT=$((STALL_COUNT + 1))
+    NEW_STALL_COUNT=$((STALL_COUNT + 1))
   else
-    STALL_COUNT=0
-    LAST_LINE_COUNT=$CURRENT_LINE_COUNT
+    NEW_STALL_COUNT=0
   fi
-  if [[ $STALL_COUNT -ge 12 ]]; then
-    echo "Error: stalled — no new output for ~3 minutes" >&2
-    kill "$CODEX_PID" 2>/dev/null || true
-    exit $EXIT_STALLED
-  fi
-  if [[ -f "$JSONL_FILE" ]]; then
-    LAST_EVENT=$(tail -1 "$JSONL_FILE" 2>/dev/null || true)
-    if [[ -n "$LAST_EVENT" ]]; then
-      EVENT_TYPE=$(echo "$LAST_EVENT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('type',''))" 2>/dev/null || true)
-      case "$EVENT_TYPE" in
-        turn.completed) wait "$CODEX_PID" 2>/dev/null || true; CODEX_PID=""; break ;;
-        turn.failed) ERROR_MSG=$(echo "$LAST_EVENT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('error',{}).get('message','unknown'))" 2>/dev/null || true); echo "Error: $ERROR_MSG" >&2; wait "$CODEX_PID" 2>/dev/null || true; exit $EXIT_TURN_FAILED ;;
-        turn.started) echo "Codex is thinking..." >&2 ;;
-        item.completed) ITEM_TYPE=$(echo "$LAST_EVENT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('item',{}).get('type',''))" 2>/dev/null || true); case "$ITEM_TYPE" in reasoning) echo "Codex thinking: $(echo "$LAST_EVENT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('item',{}).get('text',''))" 2>/dev/null || true)" >&2 ;; command_execution) echo "Codex ran: $(echo "$LAST_EVENT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('item',{}).get('command',''))" 2>/dev/null || true)" >&2 ;; esac ;;
-        item.started) ITEM_TYPE=$(echo "$LAST_EVENT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('item',{}).get('type',''))" 2>/dev/null || true); if [[ "$ITEM_TYPE" == "command_execution" ]]; then echo "Codex running: $(echo "$LAST_EVENT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('item',{}).get('command',''))" 2>/dev/null || true)" >&2; fi ;;
-      esac
+
+  # --- Helper: write final.txt and kill processes ---
+  write_final_and_cleanup() {
+    local final_content="$1"
+    local final_tmp
+    final_tmp=$(mktemp "$STATE_DIR/final.txt.XXXXXX")
+    printf '%s' "$final_content" > "$final_tmp"
+    mv "$final_tmp" "$STATE_DIR/final.txt"
+    # Kill Codex process group if alive
+    if kill -0 "$CODEX_PID" 2>/dev/null; then
+      kill -TERM -"$CODEX_PGID" 2>/dev/null || true
+    fi
+    # Kill watchdog if alive
+    if [[ -n "$WATCHDOG_PID" ]] && kill -0 "$WATCHDOG_PID" 2>/dev/null; then
+      kill "$WATCHDOG_PID" 2>/dev/null || true
+    fi
+  }
+
+  # --- Parse JSONL events (BEFORE timeout/stall checks) ---
+  # Terminal events take priority: if Codex finished, we want the result
+  # even if we're past the timeout window.
+  # Python3 script outputs:
+  #   stdout: POLL:<status>:<elapsed>s[:...] lines
+  #   stderr: [Xs] progress messages
+  #   Writes review.txt if completed
+  POLL_OUTPUT=$(python3 -c "
+import sys, json, os
+
+state_dir = sys.argv[1]
+last_line_count = int(sys.argv[2])
+elapsed = int(sys.argv[3])
+process_alive = int(sys.argv[4])
+timeout_val = int(sys.argv[5]) if len(sys.argv) > 5 else 0
+
+jsonl_file = os.path.join(state_dir, 'output.jsonl')
+err_file = os.path.join(state_dir, 'error.log')
+
+all_lines = []
+turn_completed = False
+turn_failed = False
+turn_failed_msg = ''
+extracted_thread_id = ''
+review_text = ''
+
+if os.path.isfile(jsonl_file):
+    with open(jsonl_file) as f:
+        all_lines = f.readlines()
+
+# Parse ALL lines for terminal state + data extraction
+for line in all_lines:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        d = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        continue
+    t = d.get('type', '')
+
+    # Thread ID from thread.started event
+    if t == 'thread.started' and d.get('thread_id'):
+        extracted_thread_id = d['thread_id']
+
+    # Terminal states
+    if t == 'turn.completed':
+        turn_completed = True
+    elif t == 'turn.failed':
+        turn_failed = True
+        turn_failed_msg = d.get('error', {}).get('message', 'unknown error')
+
+    # Review text from agent_message (inside item.completed)
+    if t == 'item.completed':
+        item = d.get('item', {})
+        if item.get('type') == 'agent_message':
+            review_text = item.get('text', '')
+
+# Parse NEW lines for progress events -> stderr
+new_lines = all_lines[last_line_count:]
+for line in new_lines:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        d = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        continue
+    t = d.get('type', '')
+    item = d.get('item', {})
+    item_type = item.get('type', '')
+
+    if t == 'turn.started':
+        print(f'[{elapsed}s] Codex is thinking...', file=sys.stderr)
+    elif t == 'item.completed' and item_type == 'reasoning':
+        text = item.get('text', '')
+        if len(text) > 150:
+            text = text[:150] + '...'
+        print(f'[{elapsed}s] Codex thinking: {text}', file=sys.stderr)
+    elif t == 'item.started' and item_type == 'command_execution':
+        cmd = item.get('command', '')
+        print(f'[{elapsed}s] Codex running: {cmd}', file=sys.stderr)
+    elif t == 'item.completed' and item_type == 'command_execution':
+        cmd = item.get('command', '')
+        print(f'[{elapsed}s] Codex completed: {cmd}', file=sys.stderr)
+    elif t == 'item.completed' and item_type == 'file_change':
+        changes = item.get('changes', [])
+        for c in changes:
+            path = c.get('path', '?')
+            kind = c.get('kind', '?')
+            print(f'[{elapsed}s] Codex changed: {path} ({kind})', file=sys.stderr)
+
+# Helper: sanitize message to single line
+def sanitize_msg(s):
+    import re
+    if s is None:
+        return 'unknown error'
+    return re.sub(r'\s+', ' ', str(s)).strip()
+
+# Determine status and output to stdout
+if turn_completed:
+    if not extracted_thread_id or not review_text:
+        error_detail = 'no thread_id' if not extracted_thread_id else 'no agent_message'
+        print(f'POLL:failed:{elapsed}s:1:turn.completed but {error_detail}')
+    else:
+        # Write review to file
+        review_path = os.path.join(state_dir, 'review.txt')
+        with open(review_path, 'w') as f:
+            f.write(review_text)
+        print(f'POLL:completed:{elapsed}s')
+        print(f'THREAD_ID:{extracted_thread_id}')
+elif turn_failed:
+    print(f'POLL:failed:{elapsed}s:3:Codex turn failed: {sanitize_msg(turn_failed_msg)}')
+elif not process_alive:
+    if timeout_val > 0 and elapsed >= timeout_val:
+        print(f'POLL:timeout:{elapsed}s:2:Timeout after {timeout_val}s')
+    else:
+        err_content = ''
+        if os.path.isfile(err_file):
+            with open(err_file) as f:
+                err_content = f.read().strip()
+        error_msg = 'Codex process exited unexpectedly'
+        if err_content:
+            error_msg += ': ' + sanitize_msg(err_content[:200])
+        print(f'POLL:failed:{elapsed}s:1:{error_msg}')
+else:
+    print(f'POLL:running:{elapsed}s')
+" "$STATE_DIR" "$LAST_LINE_COUNT" "$ELAPSED" "$PROCESS_ALIVE" "$TIMEOUT" 2>&2)
+
+  # Parse first line for status
+  POLL_STATUS=$(echo "$POLL_OUTPUT" | head -1 | cut -d: -f2)
+
+  if [[ "$POLL_STATUS" != "running" ]]; then
+    # Terminal state — write final.txt and cleanup
+    write_final_and_cleanup "$POLL_OUTPUT"
+  else
+    # --- Only check timeout/stall when still running (no terminal event yet) ---
+    if [[ $ELAPSED -ge $TIMEOUT ]]; then
+      POLL_OUTPUT="POLL:timeout:${ELAPSED}s:${EXIT_TIMEOUT}:Timeout after ${TIMEOUT}s"
+      write_final_and_cleanup "$POLL_OUTPUT"
+      POLL_STATUS="timeout"
+    elif [[ $NEW_STALL_COUNT -ge 12 && $PROCESS_ALIVE -eq 1 ]]; then
+      POLL_OUTPUT="POLL:stalled:${ELAPSED}s:${EXIT_STALLED}:No new output for ~3 minutes"
+      write_final_and_cleanup "$POLL_OUTPUT"
+      POLL_STATUS="stalled"
     fi
   fi
-done
 
-if [[ ! -f "$JSONL_FILE" ]]; then echo "Error: no output" >&2; test -f "$ERR_FILE" && cat "$ERR_FILE" >&2; exit $EXIT_ERROR; fi
-if grep -q '"type":"turn.failed"' "$JSONL_FILE" 2>/dev/null; then ERROR_MSG=$(grep '"type":"turn.failed"' "$JSONL_FILE" | tail -1 | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('error',{}).get('message','unknown'))" 2>/dev/null || true); echo "Error: Codex turn failed: $ERROR_MSG" >&2; exit $EXIT_TURN_FAILED; fi
-if ! grep -q '"type":"turn.completed"' "$JSONL_FILE" 2>/dev/null; then echo "Error: no turn.completed" >&2; test -f "$ERR_FILE" && test -s "$ERR_FILE" && cat "$ERR_FILE" >&2; exit $EXIT_ERROR; fi
+  # --- Update state.json (atomic) ---
+  STATE_TMP=$(mktemp "$STATE_DIR/state.json.XXXXXX")
+  python3 -c "
+import sys, json
+with open(sys.argv[1]) as f:
+    s = json.load(f)
+s['last_line_count'] = int(sys.argv[2])
+s['stall_count'] = int(sys.argv[3])
+s['last_poll_at'] = int(sys.argv[4])
+with open(sys.argv[5], 'w') as f:
+    json.dump(s, f, indent=2)
+" "$STATE_DIR/state.json" "$CURRENT_LINE_COUNT" "$NEW_STALL_COUNT" "$NOW" "$STATE_TMP"
+  mv "$STATE_TMP" "$STATE_DIR/state.json"
 
-EXTRACTED_THREAD_ID=$(grep '"thread_id"' "$JSONL_FILE" 2>/dev/null | head -1 | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('thread_id',''))" 2>/dev/null || true)
-REVIEW_TEXT=$(grep '"type":"agent_message"' "$JSONL_FILE" 2>/dev/null | tail -1 | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('item',{}).get('text',''))" 2>/dev/null || true)
-if [[ -z "$REVIEW_TEXT" ]]; then echo "Error: no agent_message" >&2; exit $EXIT_ERROR; fi
-if [[ -z "$EXTRACTED_THREAD_ID" ]]; then echo "Error: no thread_id" >&2; exit $EXIT_ERROR; fi
+  # --- Output ---
+  echo "$POLL_OUTPUT"
+  exit $EXIT_SUCCESS
+fi
 
-REVIEW_JSON=$(THREAD_ID_VAL="$EXTRACTED_THREAD_ID" python3 -c "import sys,json,os; text=sys.stdin.read(); print(json.dumps({'thread_id':os.environ.get('THREAD_ID_VAL',''),'review':text,'status':'success'}))" <<< "$REVIEW_TEXT")
-echo "CODEX_RESULT:${REVIEW_JSON}"
-exit 0
+# ============================================================
+# SUBCOMMAND: stop
+# ============================================================
+if [[ "${do_stop:-}" == 1 ]]; then
+
+  STATE_DIR="${1:-}"
+  if [[ -z "$STATE_DIR" ]]; then
+    echo "Error: state directory argument required" >&2
+    exit $EXIT_ERROR
+  fi
+
+  # Validate STATE_DIR: realpath + state.json + reconstruct from working_dir+run_id
+  STATE_DIR_REAL=$(realpath "$STATE_DIR" 2>/dev/null || true)
+  if [[ -z "$STATE_DIR_REAL" || ! -d "$STATE_DIR_REAL" ]]; then
+    echo "Error: state directory does not exist" >&2
+    exit $EXIT_ERROR
+  fi
+  STATE_DIR="$STATE_DIR_REAL"
+  if [[ ! -f "$STATE_DIR/state.json" ]]; then
+    echo "Error: no state.json found in $STATE_DIR — not a valid runner state" >&2
+    exit $EXIT_ERROR
+  fi
+
+  # Reconstruct expected path from state.json and compare
+  VALIDATE_RESULT=$(python3 -c "
+import sys, json, os
+with open(sys.argv[1]) as f:
+    s = json.load(f)
+wd = os.path.realpath(s.get('working_dir', ''))
+rid = s.get('run_id', '')
+expected = os.path.join(wd, '.codex-review', 'runs', rid)
+actual = os.path.realpath(sys.argv[2])
+print('OK' if expected == actual else 'MISMATCH')
+" "$STATE_DIR/state.json" "$STATE_DIR" 2>/dev/null || echo "ERROR")
+
+  if [[ "$VALIDATE_RESULT" == "MISMATCH" ]]; then
+    # Fallback: check old /tmp format for migration
+    if [[ "$STATE_DIR_REAL" =~ ^(/tmp|/private/tmp)/codex-runner-[0-9]+-[0-9]+$ ]]; then
+      echo "[migration] Accepting legacy /tmp state directory" >&2
+    else
+      echo "Error: state directory path mismatch" >&2
+      exit $EXIT_ERROR
+    fi
+  elif [[ "$VALIDATE_RESULT" != "OK" ]]; then
+    echo "Error: state.json validation error" >&2
+    exit $EXIT_ERROR
+  fi
+
+  if [[ -f "$STATE_DIR/state.json" ]]; then
+    # Parse PID/PGID/watchdog
+    STOP_VALS=$(python3 -c "
+import sys, json
+with open(sys.argv[1]) as f:
+    s = json.load(f)
+print(s.get('pgid', ''))
+print(s.get('watchdog_pid', ''))
+" "$STATE_DIR/state.json" 2>/dev/null || true)
+
+    CODEX_PGID=$(echo "$STOP_VALS" | sed -n '1p')
+    WATCHDOG_PID=$(echo "$STOP_VALS" | sed -n '2p')
+
+    # Kill Codex process group
+    if [[ -n "$CODEX_PGID" ]]; then
+      kill -TERM -"$CODEX_PGID" 2>/dev/null || true
+      sleep 1
+      kill -KILL -"$CODEX_PGID" 2>/dev/null || true
+    fi
+
+    # Kill watchdog
+    if [[ -n "$WATCHDOG_PID" ]] && kill -0 "$WATCHDOG_PID" 2>/dev/null; then
+      kill "$WATCHDOG_PID" 2>/dev/null || true
+    fi
+  fi
+
+  # Remove state directory
+  rm -rf "$STATE_DIR"
+  exit $EXIT_SUCCESS
+fi
+
+# ============================================================
+# LEGACY MODE (no subcommand — backwards compatible)
+# ============================================================
+if [[ "${do_legacy:-}" == 1 ]]; then
+
+  # --- Defaults ---
+  WORKING_DIR=""
+  EFFORT="high"
+  THREAD_ID=""
+  TIMEOUT=540
+  POLL_INTERVAL=15
+
+  # --- Parse arguments ---
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --mode) shift 2 ;;  # accepted but ignored for backwards compatibility
+      --working-dir) WORKING_DIR="$2"; shift 2 ;;
+      --effort) EFFORT="$2"; shift 2 ;;
+      --thread-id) THREAD_ID="$2"; shift 2 ;;
+      --timeout) TIMEOUT="$2"; shift 2 ;;
+      --poll-interval) POLL_INTERVAL="$2"; shift 2 ;;
+      --version) echo "codex-runner $CODEX_RUNNER_VERSION"; exit 0 ;;
+      *) echo "Unknown option: $1" >&2; exit $EXIT_ERROR ;;
+    esac
+  done
+
+  # --- Validate ---
+  if [[ -z "$WORKING_DIR" ]]; then
+    echo "Error: --working-dir is required" >&2
+    exit $EXIT_ERROR
+  fi
+  if ! command -v codex &>/dev/null; then
+    echo "Error: codex CLI not found in PATH" >&2
+    exit $EXIT_CODEX_NOT_FOUND
+  fi
+
+  # --- Canonicalize WORKING_DIR ---
+  WORKING_DIR_REAL=$(realpath "$WORKING_DIR")
+  WORKING_DIR="$WORKING_DIR_REAL"
+
+  # --- Read prompt from stdin ---
+  PROMPT=$(cat)
+  if [[ -z "$PROMPT" ]]; then
+    echo "Error: no prompt provided on stdin" >&2
+    exit $EXIT_ERROR
+  fi
+
+  # --- Temp files ---
+  RUN_ID="$(date +%s)-$$"
+  mkdir -p "${WORKING_DIR}/.codex-review/runs"
+  JSONL_FILE="${WORKING_DIR}/.codex-review/runs/${RUN_ID}.jsonl"
+  ERR_FILE="${WORKING_DIR}/.codex-review/runs/${RUN_ID}.err"
+
+  cleanup() {
+    local codex_pid_local="${CODEX_PID:-}"
+    if [[ -n "$codex_pid_local" ]] && kill -0 "$codex_pid_local" 2>/dev/null; then
+      kill "$codex_pid_local" 2>/dev/null || true
+      wait "$codex_pid_local" 2>/dev/null || true
+    fi
+    rm -f "$JSONL_FILE" "$ERR_FILE"
+  }
+  trap cleanup EXIT
+
+  # --- Build and launch Codex command ---
+  CODEX_PID=""
+
+  if [[ -n "$THREAD_ID" ]]; then
+    cd "$WORKING_DIR"
+    echo "$PROMPT" | codex exec --skip-git-repo-check --json resume "$THREAD_ID" \
+      > "$JSONL_FILE" 2>"$ERR_FILE" &
+    CODEX_PID=$!
+  else
+    echo "$PROMPT" | codex exec --skip-git-repo-check --json \
+      --sandbox read-only \
+      --config model_reasoning_effort="$EFFORT" \
+      -C "$WORKING_DIR" \
+      > "$JSONL_FILE" 2>"$ERR_FILE" &
+    CODEX_PID=$!
+  fi
+
+  # --- Poll loop ---
+  ELAPSED=0
+  STALL_COUNT=0
+  LAST_LINE_COUNT=0
+  START_SECONDS=$SECONDS
+
+  while true; do
+    sleep "$POLL_INTERVAL"
+    ELAPSED=$((SECONDS - START_SECONDS))
+
+    if [[ $ELAPSED -ge $TIMEOUT ]]; then
+      echo "[${ELAPSED}s] Error: timeout after ${TIMEOUT}s" >&2
+      kill "$CODEX_PID" 2>/dev/null || true
+      exit $EXIT_TIMEOUT
+    fi
+
+    if ! kill -0 "$CODEX_PID" 2>/dev/null; then
+      wait "$CODEX_PID" 2>/dev/null || true
+      CODEX_PID=""
+      break
+    fi
+
+    if [[ -f "$JSONL_FILE" ]]; then
+      CURRENT_LINE_COUNT=$(wc -l < "$JSONL_FILE" 2>/dev/null || echo 0)
+      CURRENT_LINE_COUNT=$(echo "$CURRENT_LINE_COUNT" | tr -d ' ')
+    else
+      CURRENT_LINE_COUNT=0
+    fi
+
+    if [[ "$CURRENT_LINE_COUNT" -eq "$LAST_LINE_COUNT" ]]; then
+      STALL_COUNT=$((STALL_COUNT + 1))
+    else
+      STALL_COUNT=0
+      LAST_LINE_COUNT=$CURRENT_LINE_COUNT
+    fi
+
+    if [[ $STALL_COUNT -ge 12 ]]; then
+      echo "[${ELAPSED}s] Error: stalled — no new output for ~3 minutes" >&2
+      kill "$CODEX_PID" 2>/dev/null || true
+      exit $EXIT_STALLED
+    fi
+
+    if [[ -f "$JSONL_FILE" ]]; then
+      LAST_EVENT=$(tail -1 "$JSONL_FILE" 2>/dev/null || true)
+      if [[ -n "$LAST_EVENT" ]]; then
+        EVENT_TYPE=$(echo "$LAST_EVENT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('type',''))" 2>/dev/null || true)
+
+        case "$EVENT_TYPE" in
+          turn.completed)
+            wait "$CODEX_PID" 2>/dev/null || true
+            CODEX_PID=""
+            break
+            ;;
+          turn.failed)
+            ERROR_MSG=$(echo "$LAST_EVENT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('error',{}).get('message','unknown error'))" 2>/dev/null || true)
+            echo "[${ELAPSED}s] Error: Codex turn failed: $ERROR_MSG" >&2
+            wait "$CODEX_PID" 2>/dev/null || true
+            CODEX_PID=""
+            exit $EXIT_TURN_FAILED
+            ;;
+          turn.started)
+            echo "[${ELAPSED}s] Codex is thinking..." >&2
+            ;;
+          item.completed)
+            ITEM_TYPE=$(echo "$LAST_EVENT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('item',{}).get('type',''))" 2>/dev/null || true)
+            case "$ITEM_TYPE" in
+              reasoning)
+                REASONING_TEXT=$(echo "$LAST_EVENT" | python3 -c "import sys,json; t=json.loads(sys.stdin.read()).get('item',{}).get('text',''); print(t[:150]+'...' if len(t)>150 else t)" 2>/dev/null || true)
+                echo "[${ELAPSED}s] Codex thinking: $REASONING_TEXT" >&2
+                ;;
+              command_execution)
+                CMD=$(echo "$LAST_EVENT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('item',{}).get('command',''))" 2>/dev/null || true)
+                echo "[${ELAPSED}s] Codex completed: $CMD" >&2
+                ;;
+              file_change)
+                CHANGES_INFO=$(echo "$LAST_EVENT" | python3 -c "
+import sys,json
+item=json.loads(sys.stdin.read()).get('item',{})
+for c in item.get('changes',[]):
+    print(c.get('path','?')+' ('+c.get('kind','?')+')')
+" 2>/dev/null || true)
+                while IFS= read -r change_line; do
+                  [[ -n "$change_line" ]] && echo "[${ELAPSED}s] Codex changed: $change_line" >&2
+                done <<< "$CHANGES_INFO"
+                ;;
+            esac
+            ;;
+          item.started)
+            ITEM_TYPE=$(echo "$LAST_EVENT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('item',{}).get('type',''))" 2>/dev/null || true)
+            if [[ "$ITEM_TYPE" == "command_execution" ]]; then
+              CMD=$(echo "$LAST_EVENT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('item',{}).get('command',''))" 2>/dev/null || true)
+              echo "[${ELAPSED}s] Codex running: $CMD" >&2
+            fi
+            ;;
+        esac
+      fi
+    fi
+  done
+
+  # --- Process exited: check for turn.completed ---
+  if [[ ! -f "$JSONL_FILE" ]]; then
+    echo "[${ELAPSED}s] Error: no JSONL output file found" >&2
+    if [[ -f "$ERR_FILE" ]]; then
+      cat "$ERR_FILE" >&2
+    fi
+    exit $EXIT_ERROR
+  fi
+
+  if grep -q '"type":"turn.failed"' "$JSONL_FILE" 2>/dev/null; then
+    ERROR_MSG=$(grep '"type":"turn.failed"' "$JSONL_FILE" | tail -1 | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('error',{}).get('message','unknown error'))" 2>/dev/null || true)
+    echo "[${ELAPSED}s] Error: Codex turn failed: $ERROR_MSG" >&2
+    exit $EXIT_TURN_FAILED
+  fi
+
+  if ! grep -q '"type":"turn.completed"' "$JSONL_FILE" 2>/dev/null; then
+    echo "[${ELAPSED}s] Error: Codex process exited without turn.completed" >&2
+    if [[ -f "$ERR_FILE" ]] && [[ -s "$ERR_FILE" ]]; then
+      echo "[${ELAPSED}s] Stderr:" >&2
+      cat "$ERR_FILE" >&2
+    fi
+    exit $EXIT_ERROR
+  fi
+
+  # --- Extract results ---
+  # thread_id comes from thread.started events
+  EXTRACTED_THREAD_ID=$(grep '"type":"thread.started"' "$JSONL_FILE" 2>/dev/null | head -1 | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('thread_id',''))" 2>/dev/null || true)
+  # agent_message is nested inside item.completed events
+  REVIEW_TEXT=$(grep '"agent_message"' "$JSONL_FILE" 2>/dev/null | tail -1 | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); item=d.get('item',{}); print(item.get('text','') if item.get('type')=='agent_message' else '')" 2>/dev/null || true)
+
+  if [[ -z "$REVIEW_TEXT" ]]; then
+    echo "[${ELAPSED}s] Error: no agent_message found in output" >&2
+    exit $EXIT_ERROR
+  fi
+
+  if [[ -z "$EXTRACTED_THREAD_ID" ]]; then
+    echo "[${ELAPSED}s] Error: no thread_id found in output" >&2
+    exit $EXIT_ERROR
+  fi
+
+  # --- Output structured result ---
+  REVIEW_JSON=$(THREAD_ID_VAL="$EXTRACTED_THREAD_ID" python3 -c "
+import sys, json, os
+text = sys.stdin.read()
+print(json.dumps({'thread_id': os.environ.get('THREAD_ID_VAL', ''), 'review': text, 'status': 'success'}))
+" <<< "$REVIEW_TEXT")
+
+  echo "CODEX_RESULT:${REVIEW_JSON}"
+  exit $EXIT_SUCCESS
+fi
 ```
 
 ### Runner Output Format
 
-The runner outputs a single line on stdout prefixed with `CODEX_RESULT:` followed by JSON:
+**Start mode** outputs a single line:
 ```
-CODEX_RESULT:{"thread_id":"...","review":"...","status":"success"}
+CODEX_STARTED:<STATE_DIR>
 ```
 
-Progress updates go to stderr (visible to user in Bash tool output).
+**Poll mode** outputs on stdout (machine-readable, one line per field):
+- Running: `POLL:running:<elapsed>s`
+- Completed: `POLL:completed:<elapsed>s` + `THREAD_ID:<id>` (review text in `<STATE_DIR>/review.txt`)
+- Failed: `POLL:failed:<elapsed>s:<exit_code>:<error>`
+- Timeout: `POLL:timeout:<elapsed>s:2:<error>`
+- Stalled: `POLL:stalled:<elapsed>s:4:<error>`
 
-### Exit Codes
+Progress events are written to stderr in format `[Xs] message` — these are visible in Bash tool output.
+
+### Exit Codes (legacy mode)
 - `0` = success
 - `1` = general error
 - `2` = timeout (540s default)
 - `3` = codex turn failed
 - `4` = codex stalled (~3 min no output)
 - `5` = codex not found in PATH
+
+### Poll Status Codes
+- `running` — Codex still working; stderr shows progress events
+- `completed` — Codex finished; `THREAD_ID:<id>` on stdout, review in `<STATE_DIR>/review.txt`
+- `failed` — Codex turn failed or process exited unexpectedly
+- `timeout` — Exceeded timeout (default 540s)
+- `stalled` — No new output for ~3 minutes
 
 ## Step 1: Gather Configuration
 
@@ -232,15 +904,17 @@ Ask the user (via `AskUserQuestion`) **only one question**:
 
 ## Step 3: Send Changes to Codex for Review (Round 1)
 
-Run the codex-runner with the bootstrap block. Use the Bash tool with `timeout: 600000`:
+### Step 3a — Start Codex
+
+Run the codex-runner `start` subcommand with the bootstrap block:
 
 ```bash
 RUNNER="${CODEX_RUNNER:-$HOME/.local/bin/codex-runner.sh}"
 NEED_INSTALL=0
 if [ -n "$CODEX_RUNNER" ] && test -x "$CODEX_RUNNER"; then
-  if ! grep -q 'CODEX_RUNNER_VERSION="1"' "$CODEX_RUNNER" 2>/dev/null; then NEED_INSTALL=1; fi
+  if ! grep -q 'CODEX_RUNNER_VERSION="4"' "$CODEX_RUNNER" 2>/dev/null; then NEED_INSTALL=1; fi
 elif ! test -x "$RUNNER"; then NEED_INSTALL=1
-elif ! grep -q 'CODEX_RUNNER_VERSION="1"' "$RUNNER" 2>/dev/null; then NEED_INSTALL=1
+elif ! grep -q 'CODEX_RUNNER_VERSION="4"' "$RUNNER" 2>/dev/null; then NEED_INSTALL=1
 fi
 if [ "$NEED_INSTALL" = 1 ]; then
   mkdir -p "$HOME/.local/bin"
@@ -252,23 +926,41 @@ RUNNER_SCRIPT
   mv "$TMP" "$HOME/.local/bin/codex-runner.sh"
   RUNNER="$HOME/.local/bin/codex-runner.sh"
 fi
-"$RUNNER" --working-dir <WORKING_DIR> --effort <EFFORT> <<'EOF'
+"$RUNNER" start --working-dir <WORKING_DIR> --effort <EFFORT> <<'EOF'
 <REVIEW_PROMPT>
 EOF
 ```
 
-**IMPORTANT**: Use `timeout: 600000` in the Bash tool call (10 min max). The script runs foreground — no `run_in_background` needed.
+The output will be: `CODEX_STARTED:<WORKING_DIR>/.codex-review/runs/<RUN_ID>`
 
-Save the `thread_id` from the output JSON — you will need it for subsequent rounds.
+Save the state directory path — you need it for polling and cleanup.
 
-### Parsing the Output
+### Step 3b — Poll Loop
 
-The last line of stdout will be:
+Call `poll` repeatedly to check progress. Each poll outputs status on stdout and progress on stderr:
+
+```bash
+sleep 20 && "$RUNNER" poll <STATE_DIR>
 ```
-CODEX_RESULT:{"thread_id":"...","review":"...","status":"success"}
+
+After each poll:
+- stdout starts with `POLL:running:` → Codex is still working. The stderr output shows progress events like `[45s] Codex running: git diff HEAD`. Call poll again with `sleep 15` between polls.
+- stdout starts with `POLL:completed:` → Extract thread_id from the `THREAD_ID:` line. Read the review from `<STATE_DIR>/review.txt` using the Read tool. Proceed to Step 3c.
+- stdout starts with `POLL:failed:` or `POLL:timeout:` or `POLL:stalled:` → Handle per Error Handling section. Call `stop` to cleanup.
+
+**Progress reporting**: The stderr output from the Bash tool call shows progress events (e.g., `[45s] Codex is thinking...`, `[52s] Codex running: git diff HEAD`). Summarize these for the user between polls.
+
+### Step 3c — Cleanup
+
+After extracting the completed result (or handling an error):
+
+```bash
+"$RUNNER" stop <STATE_DIR>
 ```
 
-Extract the JSON after `CODEX_RESULT:` prefix. Get `thread_id` for resume and `review` for the review text.
+This kills any remaining processes and removes the state directory.
+
+Save the `thread_id` from the `THREAD_ID:` line — you will need it for subsequent rounds.
 
 ### Review Prompt Template
 
@@ -347,15 +1039,17 @@ After receiving Codex's review, you (Claude Code) must:
 
 ## Step 5: Continue the Debate (Rounds 2+)
 
-Run the runner again with `--thread-id` for resume:
+### Step 5a — Start Codex (resume)
+
+Run the runner with `--thread-id` to resume the existing Codex conversation:
 
 ```bash
 RUNNER="${CODEX_RUNNER:-$HOME/.local/bin/codex-runner.sh}"
 NEED_INSTALL=0
 if [ -n "$CODEX_RUNNER" ] && test -x "$CODEX_RUNNER"; then
-  if ! grep -q 'CODEX_RUNNER_VERSION="1"' "$CODEX_RUNNER" 2>/dev/null; then NEED_INSTALL=1; fi
+  if ! grep -q 'CODEX_RUNNER_VERSION="4"' "$CODEX_RUNNER" 2>/dev/null; then NEED_INSTALL=1; fi
 elif ! test -x "$RUNNER"; then NEED_INSTALL=1
-elif ! grep -q 'CODEX_RUNNER_VERSION="1"' "$RUNNER" 2>/dev/null; then NEED_INSTALL=1
+elif ! grep -q 'CODEX_RUNNER_VERSION="4"' "$RUNNER" 2>/dev/null; then NEED_INSTALL=1
 fi
 if [ "$NEED_INSTALL" = 1 ]; then
   mkdir -p "$HOME/.local/bin"
@@ -367,9 +1061,19 @@ RUNNER_SCRIPT
   mv "$TMP" "$HOME/.local/bin/codex-runner.sh"
   RUNNER="$HOME/.local/bin/codex-runner.sh"
 fi
-"$RUNNER" --working-dir <WORKING_DIR> --effort <EFFORT> --thread-id <THREAD_ID> <<'EOF'
+"$RUNNER" start --working-dir <WORKING_DIR> --effort <EFFORT> --thread-id <THREAD_ID> <<'EOF'
 <REBUTTAL_PROMPT>
 EOF
+```
+
+### Step 5b — Poll Loop
+
+Same as Step 3b — poll until completed, then proceed to Step 5c.
+
+### Step 5c — Cleanup
+
+```bash
+"$RUNNER" stop <STATE_DIR>
 ```
 
 ### Rebuttal Prompt Template
@@ -462,7 +1166,7 @@ Then ask the user (via `AskUserQuestion`):
 4. **Always use heredoc (`<<'EOF'`) for prompts** - Heredoc with single-quoted delimiter prevents shell expansion.
 5. **Always provide the plan file path** - So Codex can cross-reference implementation against intent. If no plan exists, explicitly state that.
 6. **No `-m` flag** - Always use Codex's default model.
-7. **Resume by thread ID** - Use the `thread_id` from the runner output JSON for subsequent rounds.
+7. **Resume by thread ID** - Use the `thread_id` from the `THREAD_ID:` line of poll completed output for subsequent rounds.
 8. **Handle repos with no HEAD** - Before running `git diff HEAD`, check `git rev-parse --verify HEAD`. If HEAD doesn't exist, use `git diff --cached` + `git diff` instead.
 9. **Claude Code does all the fixing** - Codex identifies issues, Claude Code applies fixes.
 10. **Be genuinely adversarial** - Don't blindly accept all of Codex's findings. Push back with evidence when Codex is wrong.
@@ -470,14 +1174,15 @@ Then ask the user (via `AskUserQuestion`):
 12. **Summarize after every round** - The user should always know what happened before the next round begins.
 13. **Respect the diff boundary** - Only review and fix code within the uncommitted changes.
 14. **Require structured output** - If Codex's response doesn't follow the ISSUE-{N} format, ask it to reformat in the resume prompt.
+15. **Always call `stop` after getting results** - Clean up the state directory after extracting the completed result or handling errors.
 
 ## Error Handling
 
 - If `git status --porcelain` shows no changes, inform the user and stop.
 - If `git rev-parse --verify HEAD` fails, use `git diff --cached` + `git diff` instead of `git diff HEAD`.
-- If the runner exits with code `2` (timeout), inform the user and ask if they want to retry.
-- If the runner exits with code `3` (turn failed), report the error from stderr.
-- If the runner exits with code `4` (stalled), ask the user whether to retry or abort.
-- If the runner exits with code `5` (codex not found), tell the user to install the Codex CLI.
+- If poll returns `POLL:timeout:`, inform the user and ask if they want to retry. Call `stop` to cleanup.
+- If poll returns `POLL:failed:`, report the error message to the user. Call `stop` to cleanup.
+- If poll returns `POLL:stalled:`, ask the user whether to retry or abort. Call `stop` to cleanup.
+- If the `start` command exits with code `5` (codex not found), tell the user to install the Codex CLI.
 - If the diff is too large for a single prompt, suggest splitting by file or directory.
 - If the debate stalls on a point, present both positions to the user and let them decide.

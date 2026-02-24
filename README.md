@@ -22,35 +22,8 @@ Both skills run multiple debate rounds — Codex finds issues, Claude Code fixes
 ### From Claude Code CLI
 
 ```bash
-claude mcp add-plugin codex-review --source https://github.com/lploc94/codex_skill
-```
-
-### Manual installation
-
-1. Clone this repo into your Claude Code plugins directory:
-
-```bash
-cd ~/.claude/plugins
-git clone https://github.com/lploc94/codex_skill.git
-```
-
-2. Or clone anywhere and add the plugin manually:
-
-```bash
-git clone https://github.com/lploc94/codex_skill.git ~/projects/codex_skill
-```
-
-Then add to your Claude Code settings (`.claude/settings.json`):
-
-```json
-{
-  "plugins": [
-    {
-      "name": "codex-review",
-      "source": "/absolute/path/to/codex_skill/plugins/codex-review"
-    }
-  ]
-}
+/plugin marketplace add lploc94/codex_skill
+/plugin install codex-review@codex-review
 ```
 
 ### Verify installation
