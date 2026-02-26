@@ -1,55 +1,39 @@
 # codex-skill
 
-CLI that installs the **codex-review** skill pack for [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
+Single-command installer for the **codex-review** skill pack for [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
 
-The pack provides three skills powered by [OpenAI Codex CLI](https://github.com/openai/codex):
+Three skills powered by [OpenAI Codex CLI](https://github.com/openai/codex):
 - `/codex-plan-review` — debate implementation plans before coding
 - `/codex-impl-review` — review uncommitted changes before commit
 - `/codex-think-about` — peer reasoning/debate on technical topics
 
 ## Requirements
 
-- Node.js >= 20
+- Node.js >= 22
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI
 - [OpenAI Codex CLI](https://github.com/openai/codex) (`codex`) in PATH
 - OpenAI API key configured for Codex
 
 ## Install
 
-### From GitHub (recommended)
-
 ```bash
-npm install -g github:lploc94/codex_skill
+npx github:lploc94/codex_skill
 ```
 
-Or if you want to clone and develop:
+### What it does
+1. Copies `codex-runner.js` to `~/.claude/skills/codex-review/scripts/`
+2. Injects the absolute runner path into each SKILL.md template
+3. Validates templates and references before finalizing
+4. Atomic swap: backs up old install, swaps in new, rolls back on failure
 
+### Verify
 ```bash
-git clone https://github.com/lploc94/codex_skill.git
-cd codex_skill
-npm link
+node ~/.claude/skills/codex-review/scripts/codex-runner.js version
 ```
 
-### Global scope
-
+### Reinstall / Update
 ```bash
-codex-skill init -g
-```
-
-Installs skills to `~/.claude/skills/codex-review/`.
-
-### Project scope
-
-```bash
-codex-skill init
-```
-
-Installs skills to `<project>/.claude/skills/codex-review/`.
-
-## Verify
-
-```bash
-codex-skill doctor
+npx github:lploc94/codex_skill
 ```
 
 ## Usage
@@ -58,50 +42,6 @@ After install, start Claude Code and run:
 - `/codex-plan-review` to debate implementation plans before coding.
 - `/codex-impl-review` to review uncommitted changes before commit.
 - `/codex-think-about` for peer reasoning with Codex.
-
-## CLI Reference
-
-```bash
-codex-skill [init] [options]
-codex-skill doctor [options]
-```
-
-Options:
-- `-g, --global`: global scope (`~/.claude/skills`)
-- `--cwd <path>`: project root for local scope
-- `--force`: replace existing install
-- `--dry-run`: print actions without writing
-- `-h, --help`: help
-- `-v, --version`: version
-
-## Project Structure
-
-```text
-.
-├── bin/
-│   └── codex-skill.js
-├── src/
-│   ├── cli/
-│   ├── commands/
-│   └── lib/
-├── skill-packs/
-│   └── codex-review/
-│       ├── manifest.json
-│       ├── scripts/
-│       │   └── codex-runner.js      ← shared Node.js runner
-│       └── skills/
-│           ├── codex-plan-review/
-│           │   ├── SKILL.md
-│           │   └── references/
-│           ├── codex-impl-review/
-│           │   ├── SKILL.md
-│           │   └── references/
-│           └── codex-think-about/
-│               ├── SKILL.md
-│               └── references/
-├── CLAUDE.md
-└── package.json
-```
 
 ## License
 

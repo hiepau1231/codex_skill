@@ -11,26 +11,12 @@ Use this skill to run adversarial review on uncommitted changes before commit.
 ## Prerequisites
 - Working tree has staged or unstaged changes.
 - `codex` CLI is installed and authenticated.
-- `codex-review` skill pack is installed (global or project scope).
+- `codex-review` skill pack is installed (`npx github:lploc94/codex_skill`).
 
-## Runner Resolution
-Resolve the shared Node.js runner from project-local scope first, then global scope:
+## Runner
 
 ```bash
-if [ -n "${CODEX_RUNNER:-}" ] && [ -f "$CODEX_RUNNER" ]; then
-  RUNNER="$CODEX_RUNNER"
-else
-  RUNNER=""
-  SEARCH_DIR="$PWD"
-  while [ "$SEARCH_DIR" != "/" ]; do
-    CANDIDATE="$SEARCH_DIR/.claude/skills/codex-review/scripts/codex-runner.js"
-    if [ -f "$CANDIDATE" ]; then RUNNER="$CANDIDATE"; break; fi
-    SEARCH_DIR=$(dirname "$SEARCH_DIR")
-  done
-  [ -z "$RUNNER" ] && [ -f "$HOME/.claude/skills/codex-review/scripts/codex-runner.js" ] && \
-    RUNNER="$HOME/.claude/skills/codex-review/scripts/codex-runner.js"
-fi
-[ -z "$RUNNER" ] && { echo "Install: npx codex-skill init -g" >&2; exit 1; }
+RUNNER="{{RUNNER_PATH}}"
 ```
 
 ## Workflow

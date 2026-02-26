@@ -11,29 +11,13 @@ Use this skill to adversarially review a plan before implementation starts.
 ## Prerequisites
 - A plan file exists (`plan.md` or equivalent).
 - `codex` CLI is installed and authenticated.
-- `codex-review` skill pack is installed (global or project scope).
+- `codex-review` skill pack is installed (`npx github:lploc94/codex_skill`).
 
-## Runner Resolution
-Resolve the shared Node.js runner from project-local scope first, then global scope:
+## Runner
 
 ```bash
-if [ -n "${CODEX_RUNNER:-}" ] && [ -f "$CODEX_RUNNER" ]; then
-  RUNNER="$CODEX_RUNNER"
-else
-  RUNNER=""
-  SEARCH_DIR="$PWD"
-  while [ "$SEARCH_DIR" != "/" ]; do
-    CANDIDATE="$SEARCH_DIR/.claude/skills/codex-review/scripts/codex-runner.js"
-    if [ -f "$CANDIDATE" ]; then RUNNER="$CANDIDATE"; break; fi
-    SEARCH_DIR=$(dirname "$SEARCH_DIR")
-  done
-  [ -z "$RUNNER" ] && [ -f "$HOME/.claude/skills/codex-review/scripts/codex-runner.js" ] && \
-    RUNNER="$HOME/.claude/skills/codex-review/scripts/codex-runner.js"
-fi
-[ -z "$RUNNER" ] && { echo "Install: npx codex-skill init -g" >&2; exit 1; }
+RUNNER="{{RUNNER_PATH}}"
 ```
-
-If runner is not found, run `npx codex-skill init -g` (global) or `npx codex-skill init` (project).
 
 ## Workflow
 1. Gather config (plan path, effort, user request, current context).

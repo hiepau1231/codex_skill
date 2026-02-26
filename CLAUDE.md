@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This repository ships an npm CLI (`codex-skill`) that installs the `codex-review` skill pack into Claude skill directories.
+This repository provides a single-command installer (`npx github:lploc94/codex_skill`) that installs the `codex-review` skill pack into `~/.claude/skills/codex-review/`.
 
 ## Project Overview
 
@@ -11,13 +11,13 @@ This repository ships an npm CLI (`codex-skill`) that installs the `codex-review
 
 ## Distribution Model
 
-- Global scope install: `~/.claude/skills/codex-review`
-- Project scope install: `<project>/.claude/skills/codex-review`
-- Installed by `codex-skill init -g` or `codex-skill init`
+- Single command install: `npx github:lploc94/codex_skill`
+- Installs to: `~/.claude/skills/codex-review/`
+- No global npm install, no CLI left behind, no node_modules on user machine
 
 ## Requirements
 
-- Node.js >= 20
+- Node.js >= 22
 - Claude Code CLI
 - OpenAI Codex CLI in PATH (`codex`)
 - OpenAI API key configured for Codex
@@ -25,25 +25,26 @@ This repository ships an npm CLI (`codex-skill`) that installs the `codex-review
 ## Development Commands
 
 ```bash
-node ./bin/codex-skill.js --help
-node ./bin/codex-skill.js doctor
-node skill-packs/codex-review/scripts/codex-runner.js version
+node ./bin/codex-skill.js                                          # run installer locally
+node skill-packs/codex-review/scripts/codex-runner.js version      # runner version
 ```
 
 There is no build system, test suite, or linter. The project is JavaScript + Markdown + JSON.
 
 ## Architecture
 
-### CLI Layout
+### Installer
 
-```text
-bin/codex-skill.js
-src/cli/
-src/commands/
-src/lib/
-```
+`bin/codex-skill.js` — single file, Node.js stdlib only, no dependencies:
+1. Runtime guard: Node.js >= 22
+2. Build staging directory alongside install target
+3. Copy `codex-runner.js` from `skill-packs/`
+4. Read SKILL.md templates (contain `{{RUNNER_PATH}}`), inject absolute path, write to staging
+5. Copy `references/` directories as-is
+6. Verify runner by spawning `node codex-runner.js version`
+7. Atomic swap: backup old install → rename staging → cleanup
 
-### Skill Pack Layout
+### Skill Pack Layout (templates + runner)
 
 ```text
 skill-packs/codex-review/
@@ -52,7 +53,25 @@ skill-packs/codex-review/
 │   └── codex-runner.js          ← single shared Node.js runner
 └── skills/
     ├── codex-plan-review/
+    │   ├── SKILL.md             ← template with {{RUNNER_PATH}}
+    │   └── references/
+    ├── codex-impl-review/
     │   ├── SKILL.md
+    │   └── references/
+    └── codex-think-about/
+        ├── SKILL.md
+        └── references/
+```
+
+### Installed Output (on user machine)
+
+```text
+~/.claude/skills/codex-review/
+├── scripts/
+│   └── codex-runner.js
+└── skills/
+    ├── codex-plan-review/
+    │   ├── SKILL.md              ← RUNNER="/abs/path/codex-runner.js" hardcoded
     │   └── references/
     ├── codex-impl-review/
     │   ├── SKILL.md
@@ -65,7 +84,7 @@ skill-packs/codex-review/
 ### Core Execution Flow
 
 1. **Skill invocation** (`/codex-plan-review`, `/codex-impl-review`, or `/codex-think-about`) follows SKILL.md step-by-step
-2. **Runner resolution**: SKILL.md resolves `scripts/codex-runner.js` from project-local or global scope
+2. **Runner path**: SKILL.md contains hardcoded absolute path to `codex-runner.js`
 3. **codex-runner.js** spawns `codex exec --json --sandbox read-only` as a detached process, polls JSONL output
 4. **Review debate loop** (plan-review, impl-review): Claude Code parses Codex's `ISSUE-{N}` review → fixes/rebuts → resumes via `--thread-id` → repeats until `APPROVE` verdict or stalemate
 5. **Peer debate loop** (think-about): Claude Code and Codex think independently → discuss → exchange perspectives → repeat until consensus or stalemate → present to user
@@ -79,6 +98,7 @@ skill-packs/codex-review/
 - **Thread persistence**: First call creates a thread; subsequent rounds use `codex exec resume <thread_id>`
 - **Stalemate detection**: Stops if same points repeat for 2 consecutive rounds with no progress
 - **PID-reuse protection**: `verifyCodex()` and `verifyWatchdog()` check process cmdline before killing — prevents killing wrong process if OS reuses the PID
+- **Atomic install**: Uses staging dir + rename for safe install/update with rollback on failure
 
 ### codex-runner.js Exit Codes
 
@@ -95,11 +115,12 @@ skill-packs/codex-review/
 - Progressive disclosure: keep `SKILL.md` lean (~40–70 lines).
 - Move long prompts/protocol details into `references/`.
 - Single shared runner at skill-pack level, not duplicated per skill.
+- `skill-packs/` is the single source of truth for templates and runner.
 
 ## Verification
 
-1. `node bin/codex-skill.js --help` — CLI hoạt động
-2. `node bin/codex-skill.js init -g --force` — install thành công
-3. `node skill-packs/codex-review/scripts/codex-runner.js version` — in version `8`
-4. `node bin/codex-skill.js doctor` — tất cả checks pass
+1. `node bin/codex-skill.js` — installer chạy thành công
+2. `node skill-packs/codex-review/scripts/codex-runner.js version` — in version `8`
+3. `ls ~/.claude/skills/codex-review/` — chứa `scripts/` + `skills/`
+4. SKILL.md chứa absolute path, không search loop
 5. Invoke `/codex-plan-review`, `/codex-impl-review`, `/codex-think-about` trong Claude Code
