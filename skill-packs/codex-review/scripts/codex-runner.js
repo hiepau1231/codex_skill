@@ -31,22 +31,67 @@ const IS_WIN = process.platform === "win32";
 // Process management
 // ============================================================
 
+/**
+ * Resolve the codex CLI command for spawning.
+ *
+ * On Windows, npm-installed CLIs are .cmd wrappers (e.g. codex.cmd).
+ * Node.js spawn() cannot resolve .cmd files without shell: true,
+ * but shell: true + detached: true drops stdio on Windows.
+ * Instead, resolve the underlying codex.js entry point and invoke
+ * it directly via node.exe — no shell needed.
+ */
+function resolveCodexCommand() {
+  if (!IS_WIN) {
+    return { cmd: "codex", prependArgs: [] };
+  }
+
+  // Try to find codex.js via npm global prefix
+  const r = spawnSync("npm", ["config", "get", "prefix"], {
+    encoding: "utf8",
+    shell: true,
+    timeout: 10000,
+  });
+  if (r.status === 0 && r.stdout) {
+    const prefix = r.stdout.trim();
+    const codexJs = path.join(
+      prefix, "node_modules", "@openai", "codex", "bin", "codex.js",
+    );
+    if (fs.existsSync(codexJs)) {
+      return { cmd: process.execPath, prependArgs: [codexJs] };
+    }
+  }
+
+  // Fallback: try common npm global path on Windows
+  const appData = process.env.APPDATA;
+  if (appData) {
+    const codexJs = path.join(
+      appData, "npm", "node_modules", "@openai", "codex", "bin", "codex.js",
+    );
+    if (fs.existsSync(codexJs)) {
+      return { cmd: process.execPath, prependArgs: [codexJs] };
+    }
+  }
+
+  // Last resort: assume "codex" is directly executable (non-npm install)
+  return { cmd: "codex", prependArgs: [] };
+}
+
 function launchCodex(stateDir, workingDir, timeoutS, threadId, effort) {
   const promptFile = path.join(stateDir, "prompt.txt");
   const jsonlFile = path.join(stateDir, "output.jsonl");
   const errFile = path.join(stateDir, "error.log");
 
-  let cmd;
+  const { cmd: resolvedCmd, prependArgs } = resolveCodexCommand();
+  let cmd = resolvedCmd;
   let args;
   let cwd;
 
   if (threadId) {
-    cmd = "codex";
-    args = ["exec", "--skip-git-repo-check", "--json", "resume", threadId];
+    args = [...prependArgs, "exec", "--skip-git-repo-check", "--json", "resume", threadId];
     cwd = workingDir;
   } else {
-    cmd = "codex";
     args = [
+      ...prependArgs,
       "exec", "--skip-git-repo-check", "--json",
       "--sandbox", "read-only",
       "--config", `model_reasoning_effort=${effort}`,
@@ -74,6 +119,10 @@ function launchCodex(stateDir, workingDir, timeoutS, threadId, effort) {
 
   const pid = child.pid;
 
+  if (pid === undefined) {
+    throw new Error(`Failed to spawn "${cmd}" — process did not start (ENOENT). Is codex installed globally?`);
+  }
+
   // Close file descriptors in parent
   fs.closeSync(fin);
   fs.closeSync(fout);
@@ -83,6 +132,7 @@ function launchCodex(stateDir, workingDir, timeoutS, threadId, effort) {
 }
 
 function isAlive(pid) {
+  if (!pid || pid <= 0) return false;
   try {
     process.kill(pid, 0);
     return true;
@@ -168,7 +218,7 @@ function verifyCodex(pid) {
   if (!isAlive(pid)) return "dead";
   const cmdline = getCmdline(pid);
   if (cmdline === null) return "unknown";
-  if (cmdline.includes("codex exec") || cmdline.includes("codex.exe exec")) {
+  if (cmdline.includes("codex exec") || cmdline.includes("codex.exe exec") || cmdline.includes("codex.js") && cmdline.includes("exec")) {
     return "verified";
   }
   return "mismatch";
