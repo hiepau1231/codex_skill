@@ -1,7 +1,7 @@
 # Codex Auto Review — Smart Router Skill
 
 **Date**: 2026-03-12
-**Status**: Revised (v2)
+**Status**: Revised (v3 — post Codex plan review)
 **Author**: Claude + hiep
 
 ---
@@ -51,6 +51,8 @@ node codex-runner.js detect --working-dir <dir> --scope <working-tree|branch|ful
 | `--threshold` | `50` | Minimum score to select a skill (0-100) |
 | `--base-branch` | auto-detect | Base branch for `branch` scope. Resolution: `--base-branch` flag > `main` > `master` > error |
 | `--max-files` | `500` | Maximum files to scan for content patterns |
+
+Note: `--max-parallel` is a SKILL.md-level parameter (not a runner parameter) controlling how many Codex processes run simultaneously. Default: 3.
 
 ### Exit Codes
 
@@ -113,8 +115,8 @@ Each rule produces a score contribution for one or more skills. Scores are cappe
 | Has uncommitted changes | `codex-impl-review` | +100 | `git diff --name-only` has output |
 | Has staged files | `codex-commit-review` | +100 | `git diff --cached --name-only` has output |
 | On non-main branch with remote | `codex-pr-review` | +80 | Branch != main/master AND has upstream |
-| Plan file exists | `codex-plan-review` | +100 | `plan.md`, `*.plan.md`, `PLAN.md`, `docs/*plan*` exist |
-| scope=full AND >50 source files | `codex-codebase-review` | +100 | File count from globbing |
+| Plan file exists | `codex-plan-review` | +100 | `plan.md`, `*.plan.md`, `PLAN.md`, `docs/**/*plan*` exist (recursive) |
+| scope=full AND >50 source files | `codex-codebase-review` | +100 | File count from globbing. **Note**: auto-review cannot delegate this skill (chunk workflow). Instead, display: "Large codebase detected — run `/codex-codebase-review` directly for full chunked analysis." |
 | scope=full AND <=50 source files | `codex-impl-review` | +80 | Fallback for smaller projects |
 
 #### Content-Based Rules (Security Signals)
@@ -147,10 +149,11 @@ These scan changed files (working-tree/branch) or all source files (full scope),
   - `codex-think-about` — requires explicit topic from user, not a code review skill
   - `codex-parallel-review` — is itself a meta-skill (would cause recursion)
   - `codex-auto-review` — self-reference prevention
+  - `codex-codebase-review` — uses chunk-based workflow incompatible with single-pass delegation. Detected by scope rules but auto-review will suggest the user invoke it directly instead of delegating.
 
 ### Cross-Platform (Windows)
 
-All git commands use `spawnSync` with `encoding: "utf8"`. On Windows, git is typically in PATH if Git for Windows is installed. If git is not available, `detect` falls back to file-only scanning (exit code 5, `"git_available": false` in output). All file path operations use `path.join()` for cross-platform compatibility.
+All git commands use `spawnSync` with `encoding: "utf8"`. On Windows, git is typically in PATH if Git for Windows is installed. If git is not available, `detect` falls back to file-only scanning (exit code 6, `"git_available": false` in output). All file path operations use `path.join()` for cross-platform compatibility.
 
 ### Implementation Details
 
@@ -159,6 +162,17 @@ All git commands use `spawnSync` with `encoding: "utf8"`. On Windows, git is typ
 - File content scanning limited to first 100KB per file for performance
 - Only scans files matching common source extensions: `.js`, `.ts`, `.py`, `.go`, `.rs`, `.java`, `.cs`, `.rb`, `.php`, `.jsx`, `.tsx`, `.vue`, `.svelte`
 - Output is always JSON to stdout
+
+### Deterministic File and Diff Selection
+
+To ensure reproducible results across runs:
+
+**File ordering:** All file lists are sorted alphabetically (locale-independent, `Array.sort()` with no comparator). When `--max-files` cap is reached, files are truncated after sort — so the same set of files is always scanned.
+
+**Change-set computation per scope:**
+- **`working-tree`**: `git diff --name-only` (unstaged) + `git diff --cached --name-only` (staged). Union of both, deduplicated, sorted.
+- **`branch`**: `git diff --name-only <base>...HEAD` where base is resolved via `--base-branch` > `main` > `master`. If detached HEAD: use `git log --oneline -1` to confirm HEAD exists, then error "Cannot determine base branch for detached HEAD — use --base-branch".
+- **`full`**: Recursive glob of source extensions from working dir, excluding `node_modules/`, `.git/`, `dist/`, `build/`, `vendor/`. Sorted alphabetically.
 
 ---
 
@@ -177,14 +191,40 @@ skill-packs/codex-review/skills/codex-auto-review/
 
 ### Prompt Construction Strategy
 
-The auto-review skill needs to build Codex prompts for each selected skill. Strategy:
+The auto-review skill delegates to existing skills by **reading their actual prompt templates at runtime**. This is true delegation, not prompt duplication.
 
-**`references/prompts.md` contains simplified prompt templates for each delegatable skill.** These are not copies of the original skills' prompts — they are streamlined single-round prompts optimized for auto-review (no debate loop). Each template includes:
-- The skill's review focus (what to look for)
-- Output format requirements (always ISSUE-{N} + VERDICT)
-- File list / diff to review
+**Strategy: Read existing skills' `references/prompts.md` at runtime.**
 
-This decouples auto-review from changes to individual skills' prompt files.
+For each selected skill, the auto-review SKILL.md instructs Claude Code to:
+1. Read `~/.claude/skills/<skill-name>/references/prompts.md`
+2. Fill in the template variables (plan path, diff, file list, etc.)
+3. Strip debate-loop-specific sections (rebuttal prompts)
+4. Use only the Round 1 prompt template
+
+This ensures:
+- **No prompt drift**: auto-review always uses the same prompts as direct skill invocation
+- **No duplication**: changes to individual skills' prompts automatically flow through
+- **Single source of truth**: each skill owns its own prompt
+
+**Per-skill delegation rules:**
+
+Not all skills can be delegated via single-pass. Skills with non-standard workflows are handled differently:
+
+| Skill | Delegatable? | Notes |
+|-------|-------------|-------|
+| `codex-impl-review` | Yes | Standard Round 1 prompt |
+| `codex-security-review` | Yes | Standard Round 1 prompt (Security Review Prompt) |
+| `codex-commit-review` | Yes | Standard Round 1 prompt |
+| `codex-pr-review` | Yes | Standard Round 1 prompt |
+| `codex-plan-review` | Yes | Standard Round 1 prompt |
+| `codex-codebase-review` | **No** | Uses chunk-review + validation workflow, cannot be reduced to single-pass. **Excluded from auto-review.** Users should invoke directly. |
+| `codex-think-about` | **No** | Not a review skill. Excluded. |
+| `codex-parallel-review` | **No** | Meta-skill. Excluded. |
+
+The auto-review `references/prompts.md` only contains:
+- Instructions for Claude Code on how to read and adapt skill prompts
+- The merge/unified-report prompt (Step 5)
+- Fallback prompt if a skill's references can't be found
 
 ### SKILL.md Workflow (5 Steps)
 
@@ -221,21 +261,48 @@ Detected skills for review:
 - Single-round catches most issues; the debate loop is for deep refinement which users can do via individual skills
 - Keeps auto-review fast (minutes, not hours)
 
+**Concurrency model:**
+- Default max parallel jobs: **3** (configurable via `--max-parallel`)
+- If more skills selected than max parallel: queue remaining, start as slots free up
+- If any parallel job fails (timeout/stall): continue other jobs, report partial results
+- If >50% of parallel jobs fail: abort remaining and suggest `--sequential` mode
+
 **Parallel mode (default):**
-1. For each selected skill, build prompt from `references/prompts.md` (skill-specific template)
-2. Start all Codex processes simultaneously: `node "$RUNNER" start --working-dir "$PWD" --effort "$EFFORT"` (always markdown format internally)
+1. For each selected skill, read its prompt template from `~/.claude/skills/<skill-name>/references/prompts.md`, fill variables, use Round 1 prompt only
+2. Start up to `--max-parallel` Codex processes simultaneously: `node "$RUNNER" start --working-dir "$PWD" --effort "$EFFORT"` (always markdown format internally)
 3. Poll all running processes in round-robin until all complete
 4. Read `review.txt` from each state directory
 
 **Sequential mode (`--sequential`):**
 1. Run skills one at a time in priority order (highest detection score first)
-2. Build each prompt, start runner, poll until complete
+2. Read each skill's prompt template, fill variables, start runner, poll until complete
 3. Append previous skill's key findings summary to next skill's prompt as context
 4. Better for deep, connected analysis
 
-**Note on internal format:** Sub-skills always output markdown internally (review.txt). Only the final merged report (Step 5) is converted to the user's requested format (json/sarif/both). This simplifies parsing and merge logic.
+**Note on internal format:** Sub-skills always output markdown internally (review.txt). Only the final merged report (Step 5) is converted to the user's requested format.
 
 #### Step 5: Merge & Report
+
+**Auto-review session directory:**
+
+The merged report is written to a dedicated auto-review session directory:
+```
+.codex-review/auto-runs/<timestamp>-<pid>/
+├── review.txt              ← merged markdown report (always present)
+├── review.json             ← canonical JSON (if format=json or both)
+├── review.sarif.json       ← SARIF output (if format=sarif or both)
+├── review.md               ← rendered markdown (if format=both)
+├── meta.json               ← session metadata (skills run, scores, timing)
+└── sub-reviews/
+    ├── codex-impl-review/  ← symlink or copy of sub-skill's state_dir/review.txt
+    └── codex-security-review/
+```
+
+- Directory path: `.codex-review/auto-runs/<unix-timestamp>-<pid>/`
+- Naming follows the same pattern as existing `.codex-review/runs/` directories
+- `meta.json` contains: skills selected, detection scores, execution mode, timing, verdicts
+- `sub-reviews/` preserves individual skill outputs for traceability
+- Claude Code creates this directory at the start of Step 5 and reports the path to the user
 
 **Merge is LLM-based (Claude Code).** Claude Code reads all review.txt files and uses its judgment to:
 
@@ -248,10 +315,11 @@ Detected skills for review:
    - All skills APPROVE → overall APPROVE
    - Mixed with stalemate → note stalemate items
 6. **Write** unified report:
-   - Always write `review.txt` (markdown)
-   - If format=json: also write `review.json` via `parseToCanonicalJSON()` + file write
-   - If format=sarif: also write `review.sarif.json` via `convertToSARIF()`
-   - If format=both: write all above + `review.md`
+   - Always write `review.txt` (markdown) to a new state directory for the auto-review session
+   - If format=json or format=both: Claude Code parses the merged markdown into canonical JSON structure and writes `review.json`
+   - If format=sarif or format=both: Claude Code converts canonical JSON to SARIF and writes `review.sarif.json`
+   - If format=both: also writes `review.md` (rendered markdown)
+   - **Conversion path**: The merged markdown is the source. Claude Code performs the conversion inline (not via runner command) since it has the parsed ISSUE-{N} data structures in memory. No new runner subcommand needed for conversion.
 
 ### Unified Report Format
 
@@ -322,7 +390,7 @@ Detected skills for review:
 
 1. **No skills detected**: If all scores < threshold, display message: "No skills matched the threshold (50). Try `--threshold 30` for broader detection, or run a specific skill directly." Do not auto-run anything.
 2. **Only 1 skill detected**: Run that skill through the auto-review workflow (single prompt, no debate), producing the unified report format. This gives consistent output format regardless of how many skills were selected.
-3. **Git not available**: `detect` returns exit code 5 with `"git_available": false`. Skip all git-based rules, use file-scanning rules only. SKILL.md warns user that detection is limited.
+3. **Git not available**: `detect` returns exit code 6 with `"git_available": false`. Skip all git-based rules, use file-scanning rules only. SKILL.md checks exit code: if 6, warn user "Git not available — detection limited to file patterns only" then continue with partial results. If 1, report error and abort.
 4. **Empty working directory**: `detect` returns exit code 1 with error message.
 5. **Huge codebase (>max-files)**: Scan first `--max-files` (default 500) files, output `"files_analyzed"` count and `"files_capped": true` in JSON. Warn user in SKILL.md display.
 6. **Parallel failures**: If one Codex process fails (poll returns `failed`/`timeout`/`stalled`), report partial results from completed skills + error note for failed skill. Never fail silently.
