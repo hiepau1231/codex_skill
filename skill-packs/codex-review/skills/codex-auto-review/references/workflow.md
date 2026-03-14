@@ -5,16 +5,37 @@
 Ask user for:
 - **Scope**: `working-tree` (default), `branch`, `full`
 - **Effort**: `low`, `medium`, `high` (default), `xhigh`
-- **Mode**: `parallel` (default), `sequential`
+- **Mode**: `auto` (default), `parallel`, `sequential`
 
 If branch scope, ask for base branch name (default: auto-detect main/master).
+
+### Mode Selection
+
+| Mode | Behavior |
+|------|----------|
+| `auto` | Use runner's recommendation based on file count, skill count, and severity |
+| `parallel` | Always run skills in parallel (up to 3 simultaneous) |
+| `sequential` | Always run skills sequentially |
 
 ## Step 2: Detection
 
 Run the detection engine:
 
 ```bash
-DETECT_OUTPUT=$(node "$RUNNER" detect --working-dir "$PWD" --scope "$SCOPE")
+DETECT_OUTPUT=$(node "$RUNNER" detect --working-dir "$PWD" --scope "$SCOPE" --effort "$EFFORT")
+```
+
+### Detection Caching
+
+The detection engine caches results to avoid re-scanning unchanged codebases:
+- Cache key: git HEAD SHA + diff hash (for working-tree/branch) or file list hash (for full)
+- Cache TTL: 5 minutes
+- Cache location: `.codex-review/cache/detect-*.json`
+
+To force re-detection, use `--no-cache` flag:
+
+```bash
+DETECT_OUTPUT=$(node "$RUNNER" detect --working-dir "$PWD" --scope "$SCOPE" --no-cache)
 ```
 
 ### Parsing Detection Output
@@ -43,7 +64,21 @@ The `detect` command outputs JSON to stdout:
   "scope": "working-tree",
   "files_analyzed": 12,
   "threshold": 50,
-  "git_available": true
+  "git_available": true,
+  "estimated_time": {
+    "total": "3m",
+    "total_seconds": 180,
+    "per_skill": {
+      "codex-impl-review": "1m",
+      "codex-security-review": "2m"
+    }
+  },
+  "execution_mode": {
+    "recommended": "parallel",
+    "confidence": "medium",
+    "reasons": ["Multiple skills (2)"]
+  },
+  "cache_hit": false
 }
 ```
 
@@ -57,19 +92,26 @@ The `detect` command outputs JSON to stdout:
 
 ### Display to User
 
-Show a table of detected skills:
+Show a table of detected skills with time estimates:
 
 ```
 Detected skills for review:
-  codex-impl-review      [100] high   - has uncommitted code changes
-  codex-security-review  [ 85] high   - SQL queries found, auth patterns detected
+  codex-impl-review      [100] high   - has uncommitted code changes (~1m)
+  codex-security-review  [ 85] high   - SQL queries found, auth patterns detected (~2m)
   codex-commit-review    [  0] --     - (below threshold, skipped)
+
+Estimated total time: ~3m
+Recommended mode: parallel (confidence: medium)
+  Reason: Multiple skills (2)
 ```
 
 ## Step 3: Confirm
 
 - Show final list of skills that will run
+- Show estimated time for each skill and total
+- Show recommended execution mode (with option to override)
 - User can add/remove skills (e.g., "also run plan-review" or "skip security-review")
+- User can override mode: "run sequential instead"
 - If `codex-codebase-review` was detected, display: "Large codebase detected (N files) -- run `/codex-codebase-review` directly for full chunked analysis."
 - If no skills detected, display: "No skills matched threshold (50). Try `--threshold 30` for broader detection, or run a specific skill directly."
 - User confirms to proceed
@@ -120,6 +162,39 @@ node "$RUNNER" stop "$STATE_DIR"
 ```
 
 ## Step 5: Merge & Report
+
+### Programmatic Pre-Merge
+
+Before sending findings to LLM for final merge, use the runner's merge command to deduplicate:
+
+```bash
+# Define session directory
+SESSION_DIR=".codex-review/auto-runs/<session>"
+
+# Create merge input JSON
+cat > "$SESSION_DIR/merge-input.json" << 'EOF'
+{
+  "skill_outputs": {
+    "codex-impl-review": [...findings from review.json...],
+    "codex-security-review": [...findings from review.json...]
+  },
+  "skill_verdicts": {
+    "codex-impl-review": "REVISE",
+    "codex-security-review": "APPROVE"
+  }
+}
+EOF
+
+# Run merge with full path
+node "$RUNNER" merge --input "$SESSION_DIR/merge-input.json" --output "$SESSION_DIR/pre-merge.json"
+```
+
+The merge command:
+- Deduplicates findings by file + line location
+- Aggregates external_refs (CWE/OWASP)
+- Preserves highest confidence finding when duplicates exist
+- Sorts by severity (critical > high > medium > low)
+- Computes unified verdict
 
 ### Session Directory
 

@@ -20,9 +20,9 @@ RUNNER="{{RUNNER_PATH}}"
 ```
 
 ## Workflow
-1. **Collect inputs**: Ask user for scope (`working-tree` default / `branch` / `full`), effort level (`low` / `medium` / `high` default / `xhigh`), and execution mode (`parallel` default / `sequential`). Set `SCOPE`, `EFFORT`, `MODE`.
-2. **Detect**: Run `node "$RUNNER" detect --working-dir "$PWD" --scope "$SCOPE"`. Parse JSON output and display detected skills with scores and reasons to user.
-3. **Confirm**: Show final list of skills to run. User can add/remove skills. User confirms to proceed.
+1. **Collect inputs**: Ask user for scope (`working-tree` default / `branch` / `full`), effort level (`low` / `medium` / `high` default / `xhigh`), and execution mode (`auto` default / `parallel` / `sequential`). Set `SCOPE`, `EFFORT`, `MODE`.
+2. **Detect**: Run `node "$RUNNER" detect --working-dir "$PWD" --scope "$SCOPE" --effort "$EFFORT"`. Parse JSON output and display detected skills with scores, reasons, time estimates, and recommended execution mode. Detection results are cached for 5 minutes.
+3. **Confirm**: Show final list of skills to run with time estimates. User can add/remove skills or override execution mode. User confirms to proceed.
 4. **Execute**: For each selected skill, read its prompt from `~/.claude/skills/<skill-name>/references/prompts.md`, fill variables, run single-round Codex review via `node "$RUNNER" start --working-dir "$PWD" --effort "$EFFORT"`. Run up to 3 in parallel (default). Poll all in round-robin until complete. See `references/workflow.md` for execution details.
 5. **Merge & Report**: Read all `review.md` outputs. Deduplicate findings, sort by severity, tag by source skill, determine unified verdict. Write merged report. See `references/output-format.md` for report format.
 

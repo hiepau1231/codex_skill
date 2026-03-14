@@ -15,7 +15,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const __filename = fileURLToPath(import.meta.url);
 
 // --- Constants ---
-const CODEX_RUNNER_VERSION = 12;
+const CODEX_RUNNER_VERSION = 14;
 
 const EXIT_SUCCESS = 0;
 const EXIT_ERROR = 1;
@@ -37,6 +37,10 @@ const EXCLUDED_DIRS = new Set([
   "node_modules", ".git", "dist", "build", "vendor",
   "__pycache__", ".next", ".nuxt", "coverage",
 ]);
+
+// --- Detection Cache Configuration ---
+const DETECT_CACHE_TTL_SECONDS = 300; // 5 minutes
+const DETECT_CACHE_VERSION = 1;
 
 const SECURITY_PATTERNS = [
   // OWASP A01:2021 - Broken Access Control
@@ -1004,7 +1008,7 @@ function writeReviewOutputs(stateDir, markdownOutput, metadata, format) {
 
 /**
  * Deduplicate findings by merging similar issues while preserving higher confidence.
- * Only deduplicates actionable "issue" type findings with matching file + problem.
+ * Uses file + line as primary key, with problem similarity as secondary match.
  * 
  * @param {Array} findings - Array of finding objects from canonical JSON
  * @returns {Array} Deduplicated findings with merged metadata
@@ -1012,7 +1016,7 @@ function writeReviewOutputs(stateDir, markdownOutput, metadata, format) {
 function deduplicateFindings(findings) {
   if (!findings || findings.length === 0) return [];
   
-  const groups = new Map(); // Key: type|file|problem, Value: array of findings
+  const groups = new Map(); // Key: file|line or file|problem, Value: array of findings
   const deduplicated = [];
   
   // Helper: normalize text for comparison
@@ -1022,6 +1026,28 @@ function deduplicateFindings(findings) {
       .trim()
       .replace(/[^a-z0-9\s]/g, "")
       .replace(/\s+/g, " ");
+  }
+  
+  // Helper: check if two problem texts are similar (substring match)
+  function problemsSimilar(p1, p2) {
+    const n1 = normalizeText(p1);
+    const n2 = normalizeText(p2);
+    if (!n1 || !n2) return false;
+    
+    // Check if one is substring of other (at least 50% overlap)
+    const shorter = n1.length < n2.length ? n1 : n2;
+    const longer = n1.length < n2.length ? n2 : n1;
+    
+    if (longer.includes(shorter)) return true;
+    
+    // Check word overlap
+    const words1 = new Set(n1.split(/\s+/));
+    const words2 = new Set(n2.split(/\s+/));
+    const intersection = [...words1].filter(w => words2.has(w));
+    const union = new Set([...words1, ...words2]);
+    
+    // Jaccard similarity > 0.5
+    return intersection.length / union.size > 0.5;
   }
   
   // Helper: score finding detail level (for selecting most detailed)
@@ -1036,7 +1062,26 @@ function deduplicateFindings(findings) {
     return score;
   }
   
-  // Group findings by type + file + problem (only for actionable issues)
+  // Helper: get deduplication key for a finding
+  function getDedupKey(finding) {
+    const file = finding.location?.file?.toLowerCase().trim();
+    const line = finding.location?.start_line;
+    const problem = normalizeText(finding.problem);
+    
+    // Primary key: file + line (exact location match)
+    if (file && line) {
+      return `loc:${file}:${line}`;
+    }
+    
+    // Fallback: file + problem hash
+    if (file && problem) {
+      return `fp:${file}:${problem.slice(0, 50)}`; // Use first 50 chars of problem
+    }
+    
+    return null;
+  }
+  
+  // Group findings by deduplication key
   for (const finding of findings) {
     // Only deduplicate "issue" type findings
     if (finding.type !== "issue") {
@@ -1044,21 +1089,44 @@ function deduplicateFindings(findings) {
       continue;
     }
     
-    const fileKey = finding.location?.file?.toLowerCase().trim();
-    const problemKey = normalizeText(finding.problem);
+    const key = getDedupKey(finding);
     
-    // If missing file or problem, keep as-is (no dedup)
-    if (!fileKey || !problemKey) {
+    if (!key) {
       deduplicated.push(finding);
       continue;
     }
     
-    const key = `${finding.type}|${fileKey}|${problemKey}`;
+    // Check if this finding matches any existing group
+    let matchedGroup = null;
     
-    if (!groups.has(key)) {
-      groups.set(key, []);
+    for (const [existingKey, group] of groups.entries()) {
+      // Exact key match
+      if (existingKey === key) {
+        matchedGroup = existingKey;
+        break;
+      }
+      
+      // Only merge across different keys for fp: (file+problem) keys where line is unknown
+      // Do NOT merge loc: keys with different lines - they are distinct issues
+      const keyParts = existingKey.split(":");
+      const findingParts = key.split(":");
+      
+      // Only consider similarity matching for fp: keys (no line number)
+      if (keyParts[0] === "fp" && findingParts[0] === "fp" && keyParts[1] === findingParts[1]) {
+        // Same file, both have no line number, check if problems are similar
+        const existingFinding = group[0];
+        if (problemsSimilar(existingFinding.problem, finding.problem)) {
+          matchedGroup = existingKey;
+          break;
+        }
+      }
     }
-    groups.get(key).push(finding);
+    
+    if (matchedGroup) {
+      groups.get(matchedGroup).push(finding);
+    } else {
+      groups.set(key, [finding]);
+    }
   }
   
   // Merge each group
@@ -1098,7 +1166,7 @@ function deduplicateFindings(findings) {
       }
     }
     
-    // Aggregate external_refs from all findings
+// Aggregate external_refs from all findings
     const allRefs = new Map();
     for (const finding of group) {
       if (finding.external_refs) {
@@ -1114,6 +1182,19 @@ function deduplicateFindings(findings) {
       merged.external_refs = Array.from(allRefs.values());
     }
     
+    // Aggregate source_skills from all findings (for multi-skill provenance)
+    const allSourceSkills = new Set();
+    for (const finding of group) {
+      if (finding.source_skill) {
+        allSourceSkills.add(finding.source_skill);
+      }
+    }
+    if (allSourceSkills.size > 0) {
+      merged.source_skills = Array.from(allSourceSkills).sort();
+      // Keep source_skill for backward compatibility (first skill)
+      merged.source_skill = merged.source_skills[0];
+    }
+    
     // Aggregate related findings
     const allRelated = new Set();
     for (const finding of group) {
@@ -1127,17 +1208,188 @@ function deduplicateFindings(findings) {
       merged.related = Array.from(allRelated);
     }
     
-    // Add metadata about deduplication
+// Add metadata about deduplication
     merged.deduplication_info = {
       merged_count: group.length,
       confidence_levels: group.map(f => f.confidence).filter((v, i, a) => a.indexOf(v) === i),
-      sources: group.map(f => f.id).filter(Boolean)
+      source_skills: Array.from(allSourceSkills).sort(),
+      original_ids: group.map(f => f.id).filter(Boolean)
     };
     
     deduplicated.push(merged);
   }
   
-  return deduplicated;
+return deduplicated;
+}
+
+// ============================================================
+// Multi-Skill Merge Functions
+// ============================================================
+
+/**
+ * Merge findings from multiple skill reviews into a unified report.
+ * 
+ * @param {Object} input - Object containing skill_outputs (map of skill name to findings array)
+ * @returns {Object} Merged report with deduplicated findings and unified verdict
+ */
+function mergeMultiSkillFindings(input) {
+  const { skill_outputs, skill_verdicts } = input;
+  
+  if (!skill_outputs || typeof skill_outputs !== "object") {
+    return { error: "Invalid input: skill_outputs required" };
+  }
+  
+  const allFindings = [];
+  const skillStats = {};
+  
+  // Collect all findings with source skill tag
+  for (const [skillName, findings] of Object.entries(skill_outputs)) {
+    if (!Array.isArray(findings)) continue;
+    
+    let issueCount = 0;
+    for (const finding of findings) {
+      // Tag with source skill
+      const taggedFinding = {
+        ...finding,
+        source_skill: skillName
+      };
+      allFindings.push(taggedFinding);
+      if (finding.type === "issue") issueCount++;
+    }
+    
+    skillStats[skillName] = {
+      total_findings: findings.length,
+      issues: issueCount,
+      verdict: skill_verdicts?.[skillName] || "UNKNOWN"
+    };
+  }
+  
+  // Deduplicate
+  const deduplicatedFindings = deduplicateFindings(allFindings);
+  
+  // Count duplicates removed
+  const duplicatesRemoved = allFindings.length - deduplicatedFindings.length;
+  
+  // Sort by severity
+  const severityOrder = { critical: 5, high: 4, medium: 3, low: 2, info: 1 };
+  deduplicatedFindings.sort((a, b) => {
+    const sevA = severityOrder[normalizeSeverity(a.severity)] || 0;
+    const sevB = severityOrder[normalizeSeverity(b.severity)] || 0;
+    return sevB - sevA;
+  });
+  
+  // Re-number findings
+  let issueNum = 1;
+  let perspectiveNum = 1;
+  let crossNum = 1;
+  let responseNum = 1;
+  
+  for (const finding of deduplicatedFindings) {
+    if (finding.type === "issue") {
+      finding.id = `ISSUE-${issueNum++}`;
+    } else if (finding.type === "perspective") {
+      finding.id = `PERSPECTIVE-${perspectiveNum++}`;
+    } else if (finding.type === "cross-cutting") {
+      finding.id = `CROSS-${crossNum++}`;
+    } else if (finding.type === "response") {
+      finding.id = `RESPONSE-${responseNum++}`;
+    }
+  }
+  
+  // Compute unified verdict
+  let unifiedVerdict = "APPROVE";
+  const verdictReasons = [];
+  
+  if (skill_verdicts) {
+    for (const [skill, verdict] of Object.entries(skill_verdicts)) {
+      if (verdict === "REVISE") {
+        unifiedVerdict = "REVISE";
+        verdictReasons.push(`${skill} returned REVISE`);
+      } else if (verdict === "STALEMATE" && unifiedVerdict !== "REVISE") {
+        unifiedVerdict = "REVISE";
+        verdictReasons.push(`${skill} reached stalemate`);
+      }
+    }
+  }
+  
+  // If any skill failed, note it
+  for (const [skill, stats] of Object.entries(skillStats)) {
+    if (stats.verdict === "FAILED" || stats.verdict === "TIMEOUT") {
+      verdictReasons.push(`${skill} did not complete (${stats.verdict})`);
+    }
+  }
+  
+  return {
+    findings: deduplicatedFindings,
+    summary: {
+      total_findings: deduplicatedFindings.length,
+      issues: deduplicatedFindings.filter(f => f.type === "issue").length,
+      duplicates_removed: duplicatesRemoved,
+      by_severity: {
+        critical: deduplicatedFindings.filter(f => normalizeSeverity(f.severity) === "critical").length,
+        high: deduplicatedFindings.filter(f => normalizeSeverity(f.severity) === "high").length,
+        medium: deduplicatedFindings.filter(f => normalizeSeverity(f.severity) === "medium").length,
+        low: deduplicatedFindings.filter(f => normalizeSeverity(f.severity) === "low").length,
+      }
+    },
+    skill_stats: skillStats,
+    verdict: {
+      overall: unifiedVerdict,
+      reasons: verdictReasons.length > 0 ? verdictReasons : ["All skills approved"]
+    }
+  };
+}
+
+function cmdMerge(argv) {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      "input": { type: "string" },
+      "output": { type: "string" },
+    },
+    strict: true,
+  });
+  
+  const inputPath = values.input;
+  const outputPath = values.output;
+  
+  if (!inputPath) {
+    process.stderr.write("Error: --input <file.json> is required\n");
+    return EXIT_ERROR;
+  }
+  
+  let input;
+  try {
+    const content = fs.readFileSync(inputPath, "utf8");
+    input = JSON.parse(content);
+  } catch (e) {
+    process.stderr.write(`Error: Failed to read input file: ${e.message}\n`);
+    return EXIT_ERROR;
+  }
+  
+  const result = mergeMultiSkillFindings(input);
+  
+  // Check for error in result
+  if (result.error) {
+    process.stderr.write(`Error: ${result.error}\n`);
+    return EXIT_ERROR;
+  }
+  
+  const output = JSON.stringify(result, null, 2);
+  
+  if (outputPath) {
+    try {
+      atomicWrite(outputPath, output);
+      process.stderr.write(`Merged report written to: ${outputPath}\n`);
+    } catch (e) {
+      process.stderr.write(`Error: Failed to write output: ${e.message}\n`);
+      return EXIT_ERROR;
+    }
+  } else {
+    process.stdout.write(output + "\n");
+  }
+  
+  return EXIT_SUCCESS;
 }
 
 // ============================================================
@@ -1488,7 +1740,7 @@ function parseJsonl(stateDir, lastLineCount, elapsed, processAlive, timeoutVal, 
     if (!extractedThreadId || !reviewText) {
       const errorDetail = !extractedThreadId ? "no thread_id" : "no agent_message";
       stdoutParts.push(`POLL:failed:${elapsed}s:1:turn.completed but ${errorDetail}`);
-    } else {
+} else {
       // Write review outputs in requested format(s)
       const format = (state && state.format) || "markdown";
       const metadata = {
@@ -1622,6 +1874,7 @@ function cmdStart(argv) {
       "thread-id": { type: "string", default: "" },
       timeout: { type: "string", default: "3600" },
       sandbox: { type: "string", default: "read-only" },
+      format: { type: "string", default: "markdown" },
     },
     strict: true,
   });
@@ -1631,6 +1884,7 @@ function cmdStart(argv) {
   const threadId = values["thread-id"] || "";
   const timeout = parseInt(values.timeout || "3600", 10);
   const sandbox = values.sandbox || "read-only";
+  const format = values.format || "markdown";
 
   const VALID_SANDBOXES = ["read-only", "workspace-write", "danger-full-access"];
   if (!VALID_SANDBOXES.includes(sandbox)) {
@@ -1698,7 +1952,7 @@ function cmdStart(argv) {
     // Launch watchdog
     watchdogPid = launchWatchdog(timeout, codexPgid);
 
-    // Write state.json atomically
+// Write state.json atomically
     const now = Math.floor(Date.now() / 1000);
     const state = {
       pid: codexPid,
@@ -1709,8 +1963,8 @@ function cmdStart(argv) {
       working_dir: resolvedWorkingDir,
       effort,
       sandbox,
-      timeout,
       format,
+      timeout,
       started_at: now,
       thread_id: threadId,
       last_line_count: 0,
@@ -1991,6 +2245,269 @@ function collectSecurityFiles(dir, maxFiles) {
   return results;
 }
 
+// ============================================================
+// Detection Cache Functions
+// ============================================================
+
+function getDetectionCacheDir(workingDir) {
+  return path.join(workingDir, ".codex-review", "cache");
+}
+
+function computeDetectionCacheKey(workingDir, scope, threshold, maxFiles, baseBranchFlag, effort) {
+  // Build a cache key based on:
+  // 1. Git HEAD SHA (if available)
+  // 2. Git staged/unstaged content hash (for working-tree scope)
+  // 3. Git branch diff content hash (for branch scope)
+  // 4. File list hash (for full scope or no git)
+  // 5. Parameters that affect result: baseBranchFlag, effort
+  
+  const parts = [`v${DETECT_CACHE_VERSION}`, scope, threshold, maxFiles];
+  
+  // Include parameters that affect the result
+  if (baseBranchFlag) parts.push(`base:${baseBranchFlag}`);
+  if (effort) parts.push(`effort:${effort}`);
+  
+  // Try to get git state for cache key
+  const hasGit = gitAvailable();
+  if (hasGit) {
+    const headSha = gitExec(["rev-parse", "HEAD"], workingDir);
+    if (headSha) {
+      parts.push(`head:${headSha.slice(0, 12)}`);
+    }
+    
+    if (scope === "working-tree") {
+      // Include content-sensitive hash of staged/unstaged changes
+      // Use --stat to capture both file names and change counts
+      const unstagedStat = gitExec(["diff", "--stat"], workingDir) || "";
+      const stagedStat = gitExec(["diff", "--cached", "--stat"], workingDir) || "";
+      const contentHash = simpleHash(unstagedStat + "|||" + stagedStat);
+      parts.push(`content:${contentHash}`);
+    } else if (scope === "branch") {
+      // Include branch diff content hash with specified base branch
+      const baseBranch = baseBranchFlag || resolveBaseBranch(workingDir, "");
+      if (baseBranch) {
+        const branchDiffStat = gitExec(["diff", "--stat", `${baseBranch}...HEAD`], workingDir) || "";
+        const contentHash = simpleHash(branchDiffStat);
+        parts.push(`branch-content:${contentHash}`);
+      }
+    }
+  } else {
+    // No git: hash file list with modification times for content sensitivity
+    const files = collectSourceFiles(workingDir, maxFiles);
+    let filesWithMtime = "";
+    for (const f of files.slice(0, 50)) { // Limit to 50 files for performance
+      try {
+        const stat = fs.statSync(path.join(workingDir, f));
+        filesWithMtime += `${f}:${stat.mtimeMs}|`;
+      } catch {
+        filesWithMtime += `${f}:?|`;
+      }
+    }
+    const filesHash = simpleHash(filesWithMtime);
+    parts.push(`files:${filesHash}`);
+  }
+  
+  return simpleHash(parts.join("|"));
+}
+
+function simpleHash(str) {
+  // Simple non-cryptographic hash for cache keys
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  return Math.abs(hash).toString(36);
+}
+
+function readDetectionCache(cacheDir, cacheKey) {
+  const cacheFile = path.join(cacheDir, `detect-${cacheKey}.json`);
+  
+  if (!fs.existsSync(cacheFile)) {
+    return null;
+  }
+  
+  try {
+    const cached = JSON.parse(fs.readFileSync(cacheFile, "utf8"));
+    const now = Math.floor(Date.now() / 1000);
+    
+    // Check TTL
+    if (cached.timestamp && (now - cached.timestamp) > DETECT_CACHE_TTL_SECONDS) {
+      // Cache expired
+      try { fs.unlinkSync(cacheFile); } catch { /* ignore */ }
+      return null;
+    }
+    
+    // Validate cache structure
+    if (!cached.output || !cached.output.skills) {
+      return null;
+    }
+    
+    return cached;
+  } catch {
+    return null;
+  }
+}
+
+function writeDetectionCache(cacheDir, cacheKey, output) {
+  try {
+    fs.mkdirSync(cacheDir, { recursive: true });
+    const cacheFile = path.join(cacheDir, `detect-${cacheKey}.json`);
+    const cached = {
+      timestamp: Math.floor(Date.now() / 1000),
+      version: DETECT_CACHE_VERSION,
+      output: output
+    };
+    atomicWrite(cacheFile, JSON.stringify(cached, null, 2));
+  } catch {
+    // Cache write failure is non-critical
+  }
+}
+
+function cleanupDetectionCache(cacheDir, maxAge = 3600) {
+  // Clean up old cache entries (default: older than 1 hour)
+  if (!fs.existsSync(cacheDir)) return;
+  
+  try {
+    const entries = fs.readdirSync(cacheDir);
+    const now = Math.floor(Date.now() / 1000);
+    
+    for (const entry of entries) {
+      if (!entry.startsWith("detect-") || !entry.endsWith(".json")) continue;
+      
+      const cacheFile = path.join(cacheDir, entry);
+      try {
+        const cached = JSON.parse(fs.readFileSync(cacheFile, "utf8"));
+        if (cached.timestamp && (now - cached.timestamp) > maxAge) {
+          fs.unlinkSync(cacheFile);
+        }
+      } catch {
+        // Invalid cache file, remove it
+        try { fs.unlinkSync(cacheFile); } catch { /* ignore */ }
+      }
+    }
+  } catch {
+    // Cleanup failure is non-critical
+  }
+}
+
+// ============================================================
+// Time Estimation Functions
+// ============================================================
+
+function estimateSkillTime(skill, fileCount, effort) {
+  // Base time in seconds per file
+  const baseTimePerFile = {
+    "codex-impl-review": 3,
+    "codex-security-review": 5,
+    "codex-commit-review": 1,  // Commits are quick
+    "codex-pr-review": 4,
+    "codex-plan-review": 8,   // Plans need more thinking
+    "codex-codebase-review": 2,
+  };
+  
+  // Effort multipliers
+  const effortMultiplier = {
+    "low": 0.5,
+    "medium": 1.0,
+    "high": 1.5,
+    "xhigh": 2.5,
+  };
+  
+  const base = baseTimePerFile[skill] || 3;
+  const mult = effortMultiplier[effort] || 1.0;
+  
+  // Estimate: base time * file count * effort multiplier
+  // With minimum of 30s and maximum based on file count
+  const rawEstimate = base * fileCount * mult;
+  const minTime = 30;
+  const maxTime = Math.max(rawEstimate, minTime);
+  
+  // Format as human-readable
+  if (maxTime < 60) {
+    return { seconds: Math.round(maxTime), display: `${Math.round(maxTime)}s` };
+  } else if (maxTime < 3600) {
+    const mins = Math.round(maxTime / 60);
+    return { seconds: Math.round(maxTime), display: `${mins}m` };
+  } else {
+    const hours = Math.floor(maxTime / 3600);
+    const mins = Math.round((maxTime % 3600) / 60);
+    return { seconds: Math.round(maxTime), display: `${hours}h ${mins}m` };
+  }
+}
+
+function estimateTotalTime(skills, fileCount, effort) {
+  let totalSeconds = 0;
+  const perSkill = {};
+  
+  for (const skill of skills) {
+    const est = estimateSkillTime(skill, fileCount, effort);
+    perSkill[skill] = est;
+    totalSeconds += est.seconds;
+  }
+  
+  // Format total
+  let display;
+  if (totalSeconds < 60) {
+    display = `${Math.round(totalSeconds)}s`;
+  } else if (totalSeconds < 3600) {
+    const mins = Math.round(totalSeconds / 60);
+    display = `${mins}m`;
+  } else {
+    const hours = Math.floor(totalSeconds / 3600);
+    const mins = Math.round((totalSeconds % 3600) / 60);
+    display = `${hours}h ${mins}m`;
+  }
+  
+  return { seconds: totalSeconds, display, perSkill };
+}
+
+// ============================================================
+// Execution Mode Recommendation
+// ============================================================
+
+function recommendExecutionMode(skills, fileCount, scores) {
+  // Factors that favor sequential:
+  // 1. Many files (>30)
+  // 2. Many skills (>3)
+  // 3. High severity security findings
+  
+  let sequentialScore = 0;
+  const reasons = [];
+  
+  if (fileCount > 50) {
+    sequentialScore += 3;
+    reasons.push(`Large number of files (${fileCount})`);
+  } else if (fileCount > 30) {
+    sequentialScore += 2;
+    reasons.push(`Moderate number of files (${fileCount})`);
+  }
+  
+  if (skills.length > 4) {
+    sequentialScore += 3;
+    reasons.push(`Many skills to run (${skills.length})`);
+  } else if (skills.length > 2) {
+    sequentialScore += 1;
+    reasons.push(`Multiple skills (${skills.length})`);
+  }
+  
+  // Check for high-severity security findings
+  const securityScore = scores["codex-security-review"]?.score || 0;
+  if (securityScore >= 80) {
+    sequentialScore += 2;
+    reasons.push("High security risk detected - thoroughness recommended");
+  }
+  
+  const recommended = sequentialScore >= 3 ? "sequential" : "parallel";
+  
+  return {
+    recommended,
+    confidence: sequentialScore >= 5 ? "high" : sequentialScore >= 3 ? "medium" : "low",
+    reasons: reasons.length > 0 ? reasons : ["Default: parallel is faster for most cases"]
+  };
+}
+
 function cmdDetect(argv) {
   const { values } = parseArgs({
     args: argv,
@@ -2000,6 +2517,8 @@ function cmdDetect(argv) {
       threshold: { type: "string", default: "50" },
       "base-branch": { type: "string", default: "" },
       "max-files": { type: "string", default: "500" },
+      "no-cache": { type: "boolean", default: false },
+      "effort": { type: "string", default: "high" },
     },
     strict: true,
   });
@@ -2009,6 +2528,8 @@ function cmdDetect(argv) {
   const threshold = parseInt(values.threshold, 10);
   const baseBranchFlag = values["base-branch"] || "";
   const maxFiles = parseInt(values["max-files"], 10);
+  const noCache = values["no-cache"];
+  const effort = values.effort || "high";
 
   if (!workingDir) {
     process.stderr.write("Error: --working-dir is required\n");
@@ -2029,7 +2550,7 @@ function cmdDetect(argv) {
     return EXIT_ERROR;
   }
 
-  try {
+try {
     const entries = fs.readdirSync(resolvedDir);
     if (entries.length === 0) {
       process.stderr.write("Error: working directory is empty\n");
@@ -2039,6 +2560,30 @@ function cmdDetect(argv) {
     process.stderr.write(`Error: cannot read working directory: ${workingDir}\n`);
     return EXIT_ERROR;
   }
+
+  // --- Check cache ---
+  const cacheDir = getDetectionCacheDir(resolvedDir);
+  const cacheKey = computeDetectionCacheKey(resolvedDir, scope, threshold, maxFiles, baseBranchFlag, effort);
+  
+  if (!noCache) {
+    const cached = readDetectionCache(cacheDir, cacheKey);
+    if (cached) {
+      process.stderr.write("[cache] Using cached detection result\n");
+      
+      // Add cache metadata to output
+      const cachedOutput = {
+        ...cached.output,
+        cache_hit: true,
+        cache_age_seconds: Math.floor(Date.now() / 1000) - cached.timestamp
+      };
+      
+      process.stdout.write(JSON.stringify(cachedOutput, null, 2) + "\n");
+      return EXIT_SUCCESS;
+    }
+  }
+  
+  // Clean up old cache entries (non-blocking)
+  cleanupDetectionCache(cacheDir);
 
   const hasGit = gitAvailable();
   let exitCode = EXIT_SUCCESS;
@@ -2299,7 +2844,7 @@ function cmdDetect(argv) {
     scores[skill].confidence = calculateConfidence(skill);
   }
 
-  // Build output
+// Build output
   const selectedSkills = Object.entries(scores)
     .filter(([, v]) => v.score >= threshold)
     .sort((a, b) => b[1].score - a[1].score)
@@ -2307,6 +2852,12 @@ function cmdDetect(argv) {
 
   const runnableSkills = selectedSkills.filter(s => !NON_DELEGATABLE.has(s));
   const recommendations = selectedSkills.filter(s => NON_DELEGATABLE.has(s));
+
+  // --- Compute time estimates ---
+  const timeEstimate = estimateTotalTime(runnableSkills, filesToScan.length, effort);
+  
+  // --- Compute execution mode recommendation ---
+  const modeRecommendation = recommendExecutionMode(runnableSkills, filesToScan.length, scores);
 
   const output = {
     skills: runnableSkills,
@@ -2317,7 +2868,26 @@ function cmdDetect(argv) {
     files_capped: filesToScan.length >= maxFiles,
     threshold,
     git_available: hasGit,
+    // New fields
+    estimated_time: {
+      total: timeEstimate.display,
+      total_seconds: timeEstimate.seconds,
+      per_skill: Object.fromEntries(
+        Object.entries(timeEstimate.perSkill).map(([k, v]) => [k, v.display])
+      )
+    },
+    execution_mode: {
+      recommended: modeRecommendation.recommended,
+      confidence: modeRecommendation.confidence,
+      reasons: modeRecommendation.reasons
+    },
+    cache_hit: false
   };
+  
+  // --- Write to cache ---
+  if (!noCache) {
+    writeDetectionCache(cacheDir, cacheKey, output);
+  }
 
   process.stdout.write(JSON.stringify(output, null, 2) + "\n");
   return exitCode;
@@ -2351,18 +2921,30 @@ function main() {
     case "_watchdog":
       exitCode = cmdWatchdog(rest);
       break;
-    case "detect":
+case "detect":
       exitCode = cmdDetect(rest);
+      break;
+    case "merge":
+      exitCode = cmdMerge(rest);
       break;
     default:
       process.stderr.write(
         "codex-runner.js — Cross-platform toolkit for Codex CLI review skills\n\n" +
         "Usage:\n" +
         "  node codex-runner.js version\n" +
-        "  node codex-runner.js start --working-dir <dir> [--effort <level>] [--thread-id <id>] [--timeout <s>] [--sandbox <mode>]\n" +
+        "  node codex-runner.js start --working-dir <dir> [--effort <level>] [--thread-id <id>] [--timeout <s>] [--sandbox <mode>] [--format <markdown|json|sarif|both>]\n" +
         "  node codex-runner.js poll <state_dir>\n" +
         "  node codex-runner.js stop <state_dir>\n" +
-        "  node codex-runner.js detect --working-dir <dir> [--scope <working-tree|branch|full>] [--threshold <0-100>] [--base-branch <branch>] [--max-files <N>]\n",
+        "  node codex-runner.js detect --working-dir <dir> [--scope <working-tree|branch|full>] [--threshold <0-100>] [--base-branch <branch>] [--max-files <N>] [--no-cache] [--effort <level>]\n" +
+        "  node codex-runner.js merge --input <file.json> [--output <file.json>]\n" +
+        "\nStart options:\n" +
+        "  --format      Output format: markdown (default), json, sarif, both\n" +
+        "\nDetection options:\n" +
+        "  --no-cache    Skip cache, always recompute detection\n" +
+        "  --effort      Effort level for time estimation (low|medium|high|xhigh)\n" +
+        "\nMerge options:\n" +
+        "  --input       JSON file with skill_outputs and skill_verdicts\n" +
+        "  --output      Output file (default: stdout)\n",
       );
       exitCode = command ? EXIT_ERROR : EXIT_SUCCESS;
       break;
