@@ -2,12 +2,14 @@
 
 Single-command installer for the **codex-review** skill pack for [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
 
-Eight skills powered by [OpenAI Codex CLI](https://github.com/openai/codex):
+Five core skills (installed by default):
 - `/codex-plan-review` — debate implementation plans before coding
 - `/codex-impl-review` — review uncommitted or branch changes before commit/merge
 - `/codex-think-about` — peer reasoning/debate on technical topics
 - `/codex-commit-review` — review commit messages for clarity and conventions
 - `/codex-pr-review` — review PRs (branch diff, commit hygiene, description)
+
+Three additional skills (installed with `-full`):
 - `/codex-parallel-review` — parallel independent review by both Claude and Codex, then debate
 - `/codex-codebase-review` — chunked full-codebase review for large projects (50-500+ files)
 - `/codex-security-review` — security-focused review using OWASP Top 10 and CWE patterns
@@ -22,11 +24,12 @@ Eight skills powered by [OpenAI Codex CLI](https://github.com/openai/codex):
 ## Install
 
 ```bash
-npx github:lploc94/codex_skill
+npx github:lploc94/codex_skill        # 5 core skills
+npx github:lploc94/codex_skill -full   # all 8 skills
 ```
 
 ### What it does
-1. Installs 8 skills directly into `~/.claude/skills/` (one directory per skill)
+1. Installs skills directly into `~/.claude/skills/` (one directory per skill)
 2. Copies the shared `codex-runner.js` to `~/.claude/skills/codex-review/scripts/`
 3. Injects the absolute runner path into each SKILL.md template
 4. Validates templates and references before finalizing
@@ -39,26 +42,30 @@ node ~/.claude/skills/codex-review/scripts/codex-runner.js version
 
 ### Reinstall / Update
 ```bash
-npx github:lploc94/codex_skill
+npx github:lploc94/codex_skill        # or with -full
 ```
 
 ### Auto-review guidance (optional)
 ```bash
 npx github:lploc94/codex_skill --auto
 ```
-Injects review guidance into `~/.claude/CLAUDE.md` so Claude Code proactively suggests the right review skill based on context (e.g., `/codex-impl-review` before commits, `/codex-security-review` for auth code). Idempotent — safe to re-run.
+Injects review guidance into `~/.claude/CLAUDE.md` so Claude Code proactively suggests the right review skill based on context (e.g., `/codex-impl-review` before commits, `/codex-security-review` for auth code). Idempotent — safe to re-run. Can combine with `-full`.
 
 ## Usage
 
 After install, start Claude Code and run:
-- `/codex-plan-review` to debate implementation plans before coding.
-- `/codex-impl-review` to review uncommitted or branch changes before commit/merge.
-- `/codex-think-about` for peer reasoning with Codex.
-- `/codex-commit-review` to review commit messages.
-- `/codex-pr-review` to review PRs (branch diff + description).
-- `/codex-parallel-review` for parallel dual-reviewer analysis + debate.
-- `/codex-codebase-review` for chunked full-codebase review (50-500+ files).
-- `/codex-security-review` for security-focused review (OWASP Top 10 + CWE patterns).
+
+**Core skills** (always installed):
+- `/codex-plan-review` — debate implementation plans before coding
+- `/codex-impl-review` — review uncommitted or branch changes before commit/merge
+- `/codex-think-about` — peer reasoning/debate on technical topics
+- `/codex-commit-review` — review commit messages for clarity and conventions
+- `/codex-pr-review` — review PRs (branch diff, commit hygiene, description)
+
+**Full skills** (requires `-full` flag):
+- `/codex-parallel-review` — parallel dual-reviewer analysis + debate
+- `/codex-codebase-review` — chunked full-codebase review (50-500+ files)
+- `/codex-security-review` — security-focused review (OWASP Top 10 + CWE patterns)
 
 ## License
 
