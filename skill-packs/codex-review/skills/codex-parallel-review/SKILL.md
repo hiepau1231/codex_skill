@@ -25,7 +25,10 @@ RUNNER="{{RUNNER_PATH}}"
 ```
 
 ## Workflow
-1. **Collect inputs**: effort level, review mode (`full-codebase` default / `working-tree` / `branch`), max debate rounds (default: 3). Capture file list (+ diff if applicable).
+1. **Collect inputs**: Auto-detect effort and announce default.
+   - **effort**: Run `git diff --name-only | wc -l` — <10 → `medium`, 10–50 → `high`, >50 → `xhigh`; default `high`.
+   - Announce: "Detected: effort=`$EFFORT` (N files changed). Proceeding — reply to override effort. Review mode: `full-codebase` (default) / `working-tree` / `branch`."
+   - Set `EFFORT`. Ask `MODE` only if user doesn't confirm default.
 2. **Launch all 5 reviewers in ONE message** (true parallelism):
    - Start Codex via runner (background subprocess).
    - Spawn 4 `code-reviewer` agents via Agent tool with `run_in_background: true`:
