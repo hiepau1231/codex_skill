@@ -10,10 +10,11 @@
 
 The codex-review skill pack has 9 skills with inconsistent UX across three dimensions:
 
-1. **SKILL.md structure varies** — sections appear in different orders, some skills have extra sections others don't (e.g., `codex-security-review` has an "Output Format" section inline; others delegate to references)
+1. **SKILL.md structure varies** — sections appear in different orders, some skills have extra sections others don't (e.g., `codex-security-review` has inline "Output Format" and "Security Categories" sections; others delegate to references)
 2. **Setup questions differ per skill** — each skill asks inputs in different ways, with no consistent vocabulary or ordering
-3. **Effort table incomplete** — `codex-pr-review` and `codex-security-review` missing "Typical time" column that other skills have
-4. **Output location inconsistent** — only `codex-auto-review` writes structured output to disk; other 5 review skills produce no persistent output
+3. **Effort table incomplete** — `codex-pr-review` and `codex-security-review` missing "Typical time" column that other skills have; `codex-codebase-review` uses a custom table structure
+4. **Output location inconsistent** — only `codex-auto-review` writes structured output to disk; the other 5 single-round review skills (impl, pr, plan, commit, security) produce no persistent output
+5. **"When to Use" section missing** — present in only 1 of 9 SKILL.md files
 
 ---
 
@@ -64,9 +65,23 @@ description: <1-line description>
 | File | Change |
 |------|--------|
 | `codex-pr-review/SKILL.md` | Add "Typical time" column to Effort table |
-| `codex-security-review/SKILL.md` | Add "Typical time" column; move inline "Output Format" and "Security Categories" sections to `references/output-format.md` |
+| `codex-security-review/SKILL.md` | Add "Typical time" column; move inline "Output Format" and "Security Categories" sections into existing `references/output-format.md` (update, not create) |
+| `codex-codebase-review/SKILL.md` | Keep custom Effort table structure (Level/Discovery/Cross-cutting/Validation columns serve different purpose); add "Typical time" column only |
 | All SKILL.md | Standardize Workflow step 1 to: `**Collect inputs**: <list>` |
-| All SKILL.md | Ensure "When to Use" section present (add where missing) |
+| All SKILL.md | Add "When to Use" section (8 of 9 currently missing — content per skill below) |
+
+**"When to Use" content for each skill:**
+
+| Skill | When to Use (1-2 sentences) |
+|-------|----------------------------|
+| `codex-impl-review` | After writing code, before committing. Use for uncommitted working-tree changes or comparing a branch against base. |
+| `codex-pr-review` | Before opening or merging a pull request. Reviews branch diff, commit history, and PR description together. |
+| `codex-commit-review` | After staging changes (draft mode) or after committing (last mode). Use to verify commit message quality before push. |
+| `codex-security-review` | When changes touch auth, crypto, SQL, user input, or file uploads. Use for security-focused pre-commit or pre-merge review. |
+| `codex-parallel-review` | When you want independent dual-reviewer analysis. Produces higher-confidence findings than single-reviewer skills. |
+| `codex-codebase-review` | For full codebase audit (50–500+ files). Not for incremental review — use for periodic architecture/quality sweeps. |
+| `codex-think-about` | When you want to debate a technical decision or design question before implementing. Not a code review skill. |
+| `codex-auto-review` | When you want zero-friction comprehensive review without deciding which skills to run. Auto-detects relevant skills. |
 
 **Effort table standard (5 columns):**
 
@@ -81,7 +96,7 @@ description: <1-line description>
 
 ### B: Unified Output Location
 
-All skills write persistent output to a standard location.
+All single-round review skills write persistent output to a standard location. `codex-parallel-review` and `codex-codebase-review` are explicitly excluded (they have their own multi-output workflows). `codex-think-about` produces no review output and is excluded.
 
 **Directory structure:**
 
@@ -95,7 +110,7 @@ All skills write persistent output to a standard location.
         └── meta.json                   ← session metadata
 ```
 
-**meta.json schema:**
+**meta.json schema — individual review skills (impl, pr, plan, commit, security):**
 
 ```json
 {
@@ -110,19 +125,42 @@ All skills write persistent output to a standard location.
 }
 ```
 
+**meta.json schema — codex-auto-review (existing schema, path only changes; `"skill"` and `"version"` fields added for consistency):**
+
+```json
+{
+  "skill": "codex-auto-review",
+  "version": 14,
+  "skills_run": ["codex-impl-review", "codex-security-review"],
+  "detection_scores": { "...": "..." },
+  "execution_mode": "parallel",
+  "timing": { "total_seconds": 120, "per_skill": { "...": "..." } },
+  "verdicts": { "codex-impl-review": "REVISE", "codex-security-review": "APPROVE" },
+  "overall_verdict": "REVISE",
+  "timestamp": "2026-03-18T07:00:00Z"
+}
+```
+
 **Migration for `codex-auto-review`:**
 - Current: `.codex-review/auto-runs/<ts>-<pid>/`
 - New: `.codex-review/sessions/codex-auto-review-<ts>-<pid>/`
+- Schema: add `"skill"` and `"version"` fields for consistency with individual skill meta.json; all other fields unchanged
+
+**Fix stale `review.json` reference:** The existing `codex-auto-review/references/workflow.md` Step 5 references `review.json` in the merge input format. Per v11 breaking changes, `review.json` is no longer generated. Update the merge input example to use `review.md` (LLM-parsed findings) instead.
 
 **Skills affected:**
-- `codex-impl-review` — add session dir creation + review.md write
-- `codex-pr-review` — add session dir creation + review.md write
-- `codex-plan-review` — add session dir creation + review.md write
-- `codex-commit-review` — add session dir creation + review.md write
-- `codex-security-review` — add session dir creation + review.md write
-- `codex-auto-review` — update path from `auto-runs/` to `sessions/`
 
-Each skill's `references/workflow.md` documents when/how to write these files.
+| Skill | Change |
+|-------|--------|
+| `codex-impl-review` | Add session dir creation + write review.md + meta.json |
+| `codex-pr-review` | Add session dir creation + write review.md + meta.json |
+| `codex-plan-review` | Add session dir creation + write review.md + meta.json |
+| `codex-commit-review` | Add session dir creation + write review.md + meta.json |
+| `codex-security-review` | Add session dir creation + write review.md + meta.json |
+| `codex-auto-review` | Update path from `auto-runs/` to `sessions/`; fix stale review.json reference |
+| `codex-parallel-review` | **Excluded** — has its own multi-output workflow |
+| `codex-codebase-review` | **Excluded** — chunked workflow produces output per chunk |
+| `codex-think-about` | **Excluded** — not a review skill, no structured output |
 
 ---
 
@@ -138,7 +176,7 @@ Skills auto-detect context and proceed with defaults. User only responds to over
 | `effort` | Count files in diff: <10 = `medium`, 10–50 = `high`, >50 = `xhigh` | Default `high` |
 | `base-branch` | Check `git remote show origin` default branch; fallback check for `main`/`master` refs | Ask user |
 | `mode` (commit-review) | `git diff --cached --quiet` fails = staged changes = `draft`; else `last` | Default `last` |
-| `plan-path` (plan-review) | Scan CWD for `plan.md`, `PLAN.md`, `docs/*plan*` | Ask user |
+| `plan-path` (plan-review) | Scan CWD for `plan.md`, `PLAN.md`, `docs/*plan*` — if single match, use it; if multiple, ask user | Ask user |
 
 **Interaction pattern:**
 
@@ -157,7 +195,7 @@ Skill: "Detected: scope=working-tree, effort=high (23 files changed)
 
 **Rules:**
 - Always display detected defaults before starting — never silently assume
-- Only block on inputs that cannot be auto-detected (e.g., PR title/description, plan file path when multiple candidates exist)
+- Only block on inputs that cannot be auto-detected (e.g., PR title/description, ambiguous plan file path)
 - Never ask about optional inputs (e.g., PR description is optional — skip if user doesn't provide)
 
 **Skills and applicable smart defaults:**
@@ -168,7 +206,7 @@ Skill: "Detected: scope=working-tree, effort=high (23 files changed)
 | `codex-pr-review` | base-branch, effort |
 | `codex-security-review` | scope, effort |
 | `codex-commit-review` | mode (draft vs last) |
-| `codex-plan-review` | plan file path |
+| `codex-plan-review` | plan file path, effort |
 | `codex-parallel-review` | effort |
 | `codex-think-about` | (no setup inputs) |
 | `codex-codebase-review` | effort |
@@ -179,12 +217,13 @@ Skill: "Detected: scope=working-tree, effort=high (23 files changed)
 
 1. **Phase 1: SKILL.md standardization** (Section A)
    - Update all 9 SKILL.md files to follow standard template
-   - Fix Effort tables for `codex-pr-review` and `codex-security-review`
-   - Move `codex-security-review` inline sections to references
+   - Add "When to Use" section to 8 missing SKILL.md files
+   - Fix Effort tables for `codex-pr-review`, `codex-security-review`, `codex-codebase-review`
+   - Update existing `codex-security-review/references/output-format.md` to absorb inline sections from SKILL.md
 
 2. **Phase 2: Unified output location** (Section B)
-   - Update `references/workflow.md` for 5 review skills to include session dir creation
-   - Update `codex-auto-review/references/workflow.md` to use new path
+   - Update `references/workflow.md` for 5 review skills to add session dir creation
+   - Update `codex-auto-review/references/workflow.md`: new path + fix stale `review.json` reference
 
 3. **Phase 3: Smart defaults** (Section C)
    - Update Workflow step 1 in each applicable SKILL.md
@@ -197,32 +236,32 @@ Skill: "Detected: scope=working-tree, effort=high (23 files changed)
 ```
 skill-packs/codex-review/skills/
 ├── codex-plan-review/
-│   ├── SKILL.md                          ← template alignment, smart defaults
+│   ├── SKILL.md                          ← template alignment, When to Use, smart defaults
 │   └── references/workflow.md            ← session dir output, detection logic
 ├── codex-impl-review/
-│   ├── SKILL.md                          ← template alignment, smart defaults
+│   ├── SKILL.md                          ← template alignment, When to Use, smart defaults
 │   └── references/workflow.md            ← session dir output, detection logic
 ├── codex-commit-review/
-│   ├── SKILL.md                          ← template alignment, smart defaults
+│   ├── SKILL.md                          ← template alignment, When to Use, smart defaults
 │   └── references/workflow.md            ← session dir output, detection logic
 ├── codex-pr-review/
-│   ├── SKILL.md                          ← template alignment + Typical time, smart defaults
+│   ├── SKILL.md                          ← template alignment, When to Use, Typical time, smart defaults
 │   └── references/workflow.md            ← session dir output, detection logic
 ├── codex-security-review/
-│   ├── SKILL.md                          ← template alignment + Typical time, move inline sections
+│   ├── SKILL.md                          ← template alignment, When to Use, Typical time, remove inline sections
 │   └── references/
-│       ├── output-format.md              ← absorb inline Output Format section
+│       ├── output-format.md              ← UPDATE existing file: absorb inline Output Format + Security Categories
 │       └── workflow.md                   ← session dir output, detection logic
 ├── codex-parallel-review/
-│   ├── SKILL.md                          ← template alignment
-│   └── references/workflow.md            ← session dir output
+│   ├── SKILL.md                          ← template alignment, When to Use
+│   └── references/workflow.md            ← no session dir change (excluded from B)
 ├── codex-codebase-review/
-│   └── SKILL.md                          ← template alignment
+│   └── SKILL.md                          ← template alignment, When to Use, Typical time column only
 ├── codex-think-about/
-│   └── SKILL.md                          ← template alignment
+│   └── SKILL.md                          ← template alignment, When to Use
 └── codex-auto-review/
     ├── SKILL.md                          ← template alignment
-    └── references/workflow.md            ← update session dir path
+    └── references/workflow.md            ← update session dir path, fix stale review.json reference
 ```
 
 ---
@@ -230,7 +269,10 @@ skill-packs/codex-review/skills/
 ## Success Criteria
 
 - [ ] All 9 SKILL.md files have identical section order
-- [ ] All Effort tables have 5 columns including "Typical time"
-- [ ] All review skills write `review.md` + `meta.json` to `.codex-review/sessions/<skill>-<ts>/`
+- [ ] All 9 SKILL.md files have a "When to Use" section
+- [ ] All Effort tables have "Typical time" column (standard 5-col for 8 skills; custom format for codebase-review with Typical time added)
+- [ ] 5 review skills (impl, pr, plan, commit, security) write `review.md` + `meta.json` to `.codex-review/sessions/<skill>-<ts>/`
+- [ ] `codex-auto-review` writes to `.codex-review/sessions/codex-auto-review-<ts>/` (updated from `auto-runs/`)
+- [ ] Stale `review.json` reference removed from `codex-auto-review/references/workflow.md`
 - [ ] All review skills display detected defaults before asking any question
 - [ ] A user invoking any two skills sees consistent interaction pattern
