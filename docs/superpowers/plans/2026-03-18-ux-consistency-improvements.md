@@ -141,6 +141,8 @@ Report `$SESSION_DIR` path to the user in the final summary.
 
 > **Scope note on step 1 labels:** Phase 1 does NOT change Workflow step 1 content — that is Phase 3's job. Phase 1 only adds sections (`When to Use`, `Typical time` column). The only exception: codex-plan-review already has `When to Use` and does not require a Phase 1 task — it is handled entirely in Phase 3 (Task 14).
 
+> **Why step 1 label is Phase 3, not Phase 1:** The spec lists "Standardize Workflow step 1 to `**Collect inputs**: <list>`" under Section A, but this label change is inseparably coupled to the smart defaults content in Phase 3 — changing the label without replacing the content would leave a misleading heading. Phase 3 tasks naturally perform both the label change and the content replacement in one atomic edit per skill. This is a deliberate sequencing decision.
+
 ### Task 1: codex-parallel-review SKILL.md
 
 **Files:**
@@ -1051,9 +1053,11 @@ Both only auto-detect `effort`.
   ```markdown
   1. **Collect inputs**: Auto-detect effort and announce default.
      - **effort**: Run `git diff --name-only | wc -l` — <10 → `medium`, 10–50 → `high`, >50 → `xhigh`; default `high`.
-     - Announce: "Detected: effort=`$EFFORT` (N files changed). Proceeding — reply to override effort or set review mode (`full-codebase` default / `working-tree` / `branch`)."
-     - Set `EFFORT` and `MODE` (default: `full-codebase`).
+     - Announce: "Detected: effort=`$EFFORT` (N files changed). Proceeding — reply to override effort. Review mode: `full-codebase` (default) / `working-tree` / `branch`."
+     - Set `EFFORT`. Ask `MODE` only if user doesn't confirm default.
   ```
+
+  > **Note:** Per spec, only `effort` is auto-detected for parallel-review. `MODE` defaults to `full-codebase` but is not detected — user overrides it by replying. This is intentional to keep the announcement short.
 
 - [ ] **Step 2: Update codex-codebase-review Workflow step 1**
 
