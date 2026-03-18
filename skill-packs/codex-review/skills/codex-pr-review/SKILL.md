@@ -24,7 +24,11 @@ RUNNER="{{RUNNER_PATH}}"
 ```
 
 ## Workflow
-1. **Ask user** to choose review effort level: `low`, `medium`, `high`, or `xhigh` (default: `high`). Ask for base branch (discover and validate — see workflow.md §1). Ask for PR title and description (optional). Set `EFFORT`.
+1. **Collect inputs**: Auto-detect context and announce defaults before asking anything.
+   - **effort**: Run `git diff --name-only <base>...HEAD | wc -l` — result <10 → `medium`, 10–50 → `high`, >50 → `xhigh`; default `high` if undetectable.
+   - **base-branch**: Check `git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null` (strip `refs/remotes/origin/` prefix); fallback to checking existence of `main` then `master`. If found, announce as detected default.
+   - Announce: "Detected: base=`$BASE`, effort=`$EFFORT` (N files changed). Proceeding — reply to override. PR title/description optional."
+   - Set `BASE` and `EFFORT`. Only block if base branch cannot be resolved.
 2. Run pre-flight checks (see `references/workflow.md` §1.5).
 3. Gather branch diff, commit log, file stats. Build prompts from `references/prompts.md`, following the Placeholder Injection Guide. **Start Codex** (background) with `node "$RUNNER" start`.
 4. **Claude Independent Analysis** (BEFORE reading Codex output): Claude analyzes the PR independently using format from `references/claude-analysis-template.md`. **INFORMATION BARRIER** — do NOT read `$STATE_DIR/review.md` until analysis is complete. See `references/workflow.md` Step 2.5.

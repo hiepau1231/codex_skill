@@ -1,5 +1,32 @@
 # PR Review Workflow
 
+## Smart Default Detection
+
+**base-branch detection:**
+```bash
+BASE=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||')
+if [ -z "$BASE" ]; then
+  git show-ref --verify --quiet refs/heads/main && BASE="main"
+  git show-ref --verify --quiet refs/heads/master && BASE="master"
+fi
+```
+
+**effort detection** (after base is resolved):
+```bash
+FILES_CHANGED=$(git diff --name-only "$BASE"...HEAD 2>/dev/null | wc -l)
+if [ "$FILES_CHANGED" -lt 10 ]; then EFFORT="medium"
+elif [ "$FILES_CHANGED" -lt 50 ]; then EFFORT="high"
+else EFFORT="xhigh"
+fi
+EFFORT=${EFFORT:-high}
+```
+
+Announce: `"Detected: base=main, effort=high (15 files changed). Proceeding — reply to override. PR title/description are optional."`
+
+Block only if `$BASE` cannot be resolved (both auto-detection and fallback fail).
+
+---
+
 ## 1) Collect Inputs
 - **Base branch discovery:**
   1. Ask user for base branch, suggest default.
