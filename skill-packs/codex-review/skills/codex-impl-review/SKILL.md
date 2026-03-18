@@ -24,7 +24,11 @@ RUNNER="{{RUNNER_PATH}}"
 ```
 
 ## Workflow
-1. **Ask user** to choose review effort level: `low`, `medium`, `high`, or `xhigh` (default: `high`). Ask review mode: `working-tree` (default) or `branch`. If branch mode, ask for base branch name and validate (see workflow.md for base branch discovery). Set `EFFORT` and `MODE`.
+1. **Collect inputs**: Auto-detect context and announce defaults before asking anything.
+   - **effort**: Run `git diff --name-only | wc -l` — result <10 → `medium`, 10–50 → `high`, >50 → `xhigh`; default `high` if undetectable.
+   - **scope**: Run `git status --short` — non-empty output → `working-tree`. Else run `git rev-list @{u}..HEAD` — non-empty → `branch`. If both conditions true, use `working-tree`. If neither, ask user.
+   - Announce: "Detected: scope=`$SCOPE`, effort=`$EFFORT` (N files changed). Proceeding — reply to override scope, effort, or both."
+   - Set `SCOPE` and `EFFORT`. Only block for inputs that remain undetectable.
 2. Run pre-flight checks (see `references/workflow.md` §1.5).
 3. Build prompt from `references/prompts.md` (Working Tree or Branch Review Prompt), following the Placeholder Injection Guide.
 4. Start round 1 with `node "$RUNNER" start --working-dir "$PWD" --effort "$EFFORT"`.
