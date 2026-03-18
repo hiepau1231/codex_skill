@@ -23,7 +23,10 @@ RUNNER="{{RUNNER_PATH}}"
 ```
 
 ## Workflow
-1. **Collect inputs**: effort level, parallel factor, focus areas.
+1. **Collect inputs**: Auto-detect effort and announce default before asking anything.
+   - **effort**: Run `git diff --name-only | wc -l` — result <10 → `medium`, 10–50 → `high`, >50 → `xhigh`; default `high` if undetectable.
+   - Announce: "Detected: effort=`$EFFORT` (N files changed). Proceeding — reply to override."
+   - Set `EFFORT`. Also ask: parallel factor (default 3 chunks), focus areas (optional).
 2. **Discovery**: detect project type, list source files, identify module boundaries.
 3. **Chunking**: group files into 500-2000 line chunks, present chunk plan.
 4. **Review loop**: for each chunk — build prompt, `node "$RUNNER" start`, poll, parse ISSUE-{N}, propagate context.
