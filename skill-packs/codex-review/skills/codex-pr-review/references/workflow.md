@@ -6,8 +6,12 @@
 ```bash
 BASE=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||')
 if [ -z "$BASE" ]; then
-  git show-ref --verify --quiet refs/heads/main && BASE="main"
-  git show-ref --verify --quiet refs/heads/master && BASE="master"
+  # First-match semantics: remote refs preferred, then local
+  if git show-ref --verify --quiet refs/remotes/origin/main; then BASE="main"
+  elif git show-ref --verify --quiet refs/remotes/origin/master; then BASE="master"
+  elif git show-ref --verify --quiet refs/heads/main; then BASE="main"
+  elif git show-ref --verify --quiet refs/heads/master; then BASE="master"
+  fi
 fi
 ```
 

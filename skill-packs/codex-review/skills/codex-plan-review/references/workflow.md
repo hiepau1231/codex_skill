@@ -2,12 +2,12 @@
 
 ## Smart Default Detection
 
-**plan-path detection** (matches spec: `plan.md`, `PLAN.md`, `docs/*plan*` only):
+**plan-path detection** (matches spec: `plan.md`, `PLAN.md`, `docs/*plan*.md` only):
 ```bash
-# Check exact names at CWD root level
-PLAN_ROOT=$(ls plan.md PLAN.md 2>/dev/null | head -1)
-# Check docs/ subdirectory for any *plan* file
-PLAN_DOCS=$(find ./docs -maxdepth 2 -name "*plan*" 2>/dev/null | head -5)
+# Check exact names at CWD root level (collect all matches, not just first)
+PLAN_ROOT=$(ls plan.md PLAN.md 2>/dev/null)
+# Check docs/ subdirectory for any *plan*.md file (depth 3 to reach docs/sub/sub/)
+PLAN_DOCS=$(find ./docs -maxdepth 3 -name "*plan*.md" 2>/dev/null | head -5)
 
 # Count total candidates
 ALL="$([ -n "$PLAN_ROOT" ] && echo "$PLAN_ROOT")
@@ -26,7 +26,7 @@ else
 fi
 ```
 
-> **Scope:** Only searches `plan.md`/`PLAN.md` at CWD root, and `docs/` subdirectory. Does NOT do deep recursive search to avoid false positives.
+> **Scope:** Only searches `plan.md`/`PLAN.md` at CWD root, and `docs/` up to 3 levels deep (e.g. `docs/superpowers/plans/*.md`). Restricts to `.md` files to avoid false positives. Does NOT do full recursive search.
 
 **effort detection:** Default `high` for plan review.
 

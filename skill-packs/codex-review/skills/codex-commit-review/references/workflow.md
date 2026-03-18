@@ -5,7 +5,11 @@
 **mode detection:**
 ```bash
 git diff --cached --quiet
-if [ $? -ne 0 ]; then MODE="draft"; else MODE="last"; fi
+EXIT=$?
+if [ $EXIT -eq 1 ]; then MODE="draft"  # exit 1 = staged changes present
+elif [ $EXIT -eq 0 ]; then MODE="last" # exit 0 = no staged changes
+else MODE=""  # git error (not a repo, etc.) — leave unset, ask user
+fi
 ```
 
 If `draft`, ask user for the commit message text to review. If `last`, use N=1 default.
