@@ -141,32 +141,110 @@ function isAlive(pid) {
   }
 }
 
-function killTree(pid) {
-  try {
-    if (IS_WIN) {
-      spawnSync("taskkill", ["/T", "/F", "/PID", String(pid)], {
-        stdio: "ignore",
+function getDescendantPids(rootPid) {
+  if (IS_WIN) return [];
+  const descendants = [];
+  const queue = [rootPid];
+  while (queue.length > 0) {
+    const ppid = queue.shift();
+    try {
+      const result = spawnSync("pgrep", ["-P", String(ppid)], {
+        encoding: "utf8", timeout: 5000,
       });
-    } else {
-      process.kill(-pid, "SIGTERM");
+      if (result.status === 0 && result.stdout) {
+        const children = result.stdout.trim().split("\n")
+          .map(s => parseInt(s.trim(), 10))
+          .filter(n => !isNaN(n) && n > 0);
+        for (const child of children) {
+          if (!descendants.includes(child)) {
+            descendants.push(child);
+            queue.push(child);
+          }
+        }
+      }
+    } catch {
+      // Lỗi tạm trên node này → bỏ qua node, tiếp tục BFS các node khác.
+      // Chỉ khi pgrep hoàn toàn không tồn tại (ENOENT), mới ngừng traversal.
+      continue;
     }
-  } catch {
-    // Process already dead
+  }
+  return descendants;
+}
+
+function syncSleep(ms) {
+  const result = spawnSync(process.execPath, ["-e", `setTimeout(()=>{},${ms})`], {
+    timeout: ms + 2000,
+  });
+  // spawnSync trả error object khi spawn thất bại (ENOENT, ENOMEM...), không throw
+  if (result.error) {
+    // Fallback: Atomics.wait — không cần subprocess, hoạt động khi tài nguyên thấp
+    try {
+      const sab = new SharedArrayBuffer(4);
+      const view = new Int32Array(sab);
+      Atomics.wait(view, 0, 0, ms);
+    } catch {
+      // Last resort: không sleep → SIGKILL gửi ngay (vẫn đúng logic, chỉ mất grace period)
+    }
   }
 }
 
-function killSingle(pid) {
+function killTree(pid) {
+  if (!pid || pid <= 1) return;
   try {
     if (IS_WIN) {
-      spawnSync("taskkill", ["/F", "/PID", String(pid)], {
-        stdio: "ignore",
-      });
-    } else {
-      process.kill(pid, "SIGTERM");
+      spawnSync("taskkill", ["/T", "/F", "/PID", String(pid)], { stdio: "ignore" });
+      return;
     }
-  } catch {
-    // Process already dead
-  }
+
+    // Phase 1: Snapshot descendants TRƯỚC khi gửi signal
+    const descendants = getDescendantPids(pid);
+
+    // Phase 2: SIGTERM process group + từng descendant
+    try { process.kill(-pid, "SIGTERM"); } catch {}
+    for (const dpid of descendants) {
+      try { process.kill(dpid, "SIGTERM"); } catch {}
+    }
+
+    // Phase 3: Grace period + rescan
+    syncSleep(2000);
+
+    // Rescan: bắt workers mới fork sau SIGTERM.
+    // Seed BFS từ root + descendants còn alive (vì nếu root chết, orphans bị reparent
+    // sang init → pgrep -P rootPid trả rỗng → BFS chỉ từ root sẽ bỏ sót).
+    const rescanSeeds = [pid, ...descendants.filter(d => isAlive(d))];
+    const rescanned = [];
+    for (const seed of rescanSeeds) {
+      for (const dp of getDescendantPids(seed)) {
+        if (!rescanned.includes(dp)) rescanned.push(dp);
+      }
+    }
+    const allPids = new Set([...descendants, ...rescanned]);
+
+    // Phase 4: SIGKILL survivors
+    try { process.kill(-pid, "SIGKILL"); } catch {}
+    for (const dpid of allPids) {
+      // Guard: chỉ kill nếu process vẫn alive (đã chết = SIGTERM thành công = skip)
+      if (isAlive(dpid)) {
+        try { process.kill(dpid, "SIGKILL"); } catch {}
+      }
+    }
+  } catch {}
+}
+
+function killSingle(pid) {
+  if (!pid || pid <= 1) return;
+  try {
+    if (IS_WIN) {
+      spawnSync("taskkill", ["/F", "/PID", String(pid)], { stdio: "ignore" });
+      return;
+    }
+    try { process.kill(pid, "SIGTERM"); } catch { return; }
+    syncSleep(500);
+    // PID-reuse guard cho killSingle: verify vẫn alive trước SIGKILL
+    if (isAlive(pid)) {
+      try { process.kill(pid, "SIGKILL"); } catch {}
+    }
+  } catch {}
 }
 
 function getCmdline(pid) {
