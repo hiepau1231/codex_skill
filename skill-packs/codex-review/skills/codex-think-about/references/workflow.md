@@ -13,7 +13,7 @@
 ## 1.8) Prompt Assembly
 
 1. Read the Round 1 template from `references/prompts.md`.
-2. Replace `{QUESTION}` with user's question or topic.
+2. Replace `{QUESTION}` with the confirmed sharpened question from step 1 (or the original question if sharpening was skipped).
 3. Replace `{PROJECT_CONTEXT}` with project description (or "Not specified — infer from codebase").
 4. Replace `{RELEVANT_FILES}` with file list (or "None specified").
 5. Replace `{CONSTRAINTS}` with scope constraints (or "None specified").

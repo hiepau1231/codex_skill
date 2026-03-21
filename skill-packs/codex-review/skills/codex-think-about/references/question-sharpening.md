@@ -112,15 +112,15 @@ Zero concrete options named → open reasoning template.
 **Example 2 — Two options named, context inferable**
 
 User: "PostgreSQL vs MongoDB for our project?"
-Inspection: fixtures/ shows document-heavy schema; package.json shows Node.js.
+Inspection: package.json shows Node.js and mongoose dependency.
 Two options named → comparison template.
 
 > 📋 Sharpened question:
 >    "Should we use PostgreSQL or MongoDB as the primary data store,
->     given a document-heavy data model and a Node.js API?
+>     given a Node.js API with existing MongoDB/Mongoose usage?
 >     Decision criteria: query flexibility, schema evolution, operational complexity."
 >
-> Inferred context: document-heavy model from fixtures/, Node.js from package.json.
+> Inferred context: Node.js and mongoose from package.json.
 > Proceed with this question? (Y/n)
 
 ---

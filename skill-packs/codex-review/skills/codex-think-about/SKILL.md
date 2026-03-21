@@ -21,9 +21,10 @@ RUNNER="{{RUNNER_PATH}}"
 
 ## Workflow
 1. **Sharpen question** — follow `references/question-sharpening.md`.
-   Confirm sharpened question with user (Y/n). The confirmed question
-   becomes `{QUESTION}` for all subsequent steps (including Claude's own
-   independent analysis and all Codex prompt rounds).
+   If that workflow produces a substantive rewrite, confirm with user (Y/n);
+   otherwise proceed with the original question directly. The confirmed
+   question (sharpened or original) becomes `{QUESTION}` for all subsequent
+   steps (including Claude's own independent analysis and all Codex prompt rounds).
 2. **Ask user** to choose reasoning effort level: `low`, `medium`, `high`, or `xhigh` (default: `high`). Gather factual context only (no premature opinion). Set `EFFORT`.
 3. Build round-1 prompt from `references/prompts.md`.
 4. **Start Codex + Claude Independent Analysis (parallel)**:
