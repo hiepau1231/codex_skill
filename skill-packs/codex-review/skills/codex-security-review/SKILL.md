@@ -203,7 +203,7 @@ Resume: `printf '%s' "$PROMPT" | node "$RUNNER" resume "$SESSION_DIR" --effort "
 | Metric | Value |
 |--------|-------|
 | Rounds | {N} |
-| Verdict | {APPROVE/REVISE/STALEMATE} |
+| Verdict | {CONSENSUS/CONTINUE/STALEMATE} |
 | Risk Level | {CRITICAL/HIGH/MEDIUM/LOW} |
 | Issues Found | {total} |
 | Issues Fixed | {fixed_count} |
