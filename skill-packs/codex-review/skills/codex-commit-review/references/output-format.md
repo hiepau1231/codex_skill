@@ -4,17 +4,20 @@ Use this exact shape:
 
 ```markdown
 ### ISSUE-{N}: {Short title}
-- Category: clarity | convention | scope | accuracy | structure
+- Category: bug | edge-case | security | performance | maintainability | commit-message
 - Severity: low | medium | high | critical
-- Commit: {SHA and subject — required for last mode, "draft" for draft mode}
+- Commit: {SHA and subject — required for last mode, "staged" for staged mode}
+- Location: {file:line-range}
 - Problem: {clear statement}
-- Evidence: {specific text or diff reference}
-- Why it matters: {impact on readability, traceability, or team workflow}
+- Evidence: {specific code snippet or diff reference}
+- Why it matters: {impact on correctness, security, performance, or maintainability}
+- Suggested fix: {description of how to fix — NOT a patch}
 
 ### Overall Assessment
-- Quality: poor | fair | good | excellent
-- Convention compliance: yes | partial | no
-- Accuracy vs diff: accurate | partially accurate | inaccurate
+- Code quality: poor | fair | good | excellent
+- Security posture: no concerns | minor concerns | significant concerns
+- Test coverage impression: adequate | gaps identified | insufficient
+- Maintainability: poor | fair | good | excellent
 
 ### VERDICT
 - Status: CONSENSUS | CONTINUE | STALEMATE

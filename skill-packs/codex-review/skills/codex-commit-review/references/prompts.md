@@ -4,11 +4,11 @@
 
 | Placeholder | Source | Required | Default |
 |-------------|--------|----------|---------|
-| `{COMMIT_MESSAGES}` | Commit message text (draft: user text; last: git log output) | Yes | — |
-| `{DIFF_CONTEXT}` | Diff command (draft: `git diff --cached`; last: `git diff HEAD~N..HEAD`) | Yes | — |
-| `{USER_REQUEST}` | User's task/request description | No | "Review commit message(s) for quality and accuracy" |
+| `{DIFF_CONTEXT}` | Diff command (staged: `git diff --cached`; last: `git diff HEAD~N..HEAD`) | Yes | — |
+| `{FILES_CHANGED}` | List of files changed (staged: `git diff --cached --name-only`; last: `git diff HEAD~N..HEAD --name-only`) | Yes | — |
+| `{USER_REQUEST}` | User's task/request description | No | "Review committed code quality" |
 | `{SESSION_CONTEXT}` | Structured context block (see schema below) | No | "Not specified" |
-| `{PROJECT_CONVENTIONS}` | Discovered conventions from §1.6 | No | "None discovered — use Git general guidelines" |
+| `{PROJECT_CONTEXT}` | Discovered project context from Step 3 (linters, test frameworks, language, CI) | No | "None discovered — use general best practices" |
 | `{OUTPUT_FORMAT}` | Copy entire fenced code block from `references/output-format.md` | Yes | — |
 | `{CLAUDE_ANALYSIS_FORMAT}` | Copy entire fenced code block from `references/claude-analysis-template.md` | Yes (Claude analysis only) | — |
 
@@ -32,20 +32,19 @@
 When user provides context or Claude can infer it, format as:
 
 ```
-Constraints: {e.g. "team uses 72-char subject line limit"}
-Assumptions: {e.g. "this is a squash commit covering multiple changes"}
-Tech stack: {languages, frameworks}
-Acceptance criteria: {what defines a good commit message for this project}
-Review scope: {draft | last N commits}
-Project conventions: {PROJECT_CONVENTIONS}
+Tech stack: {languages, frameworks, key libraries}
+Review scope: {staged | last N commits}
+Project context: {e.g. "monorepo with shared packages", "microservice handling payments"}
+Constraints: {e.g. "performance-critical path", "public API surface"}
+Assumptions: {e.g. "this is a hotfix for production issue"}
 ```
 
 ---
 
-## Draft Review Prompt (Round 1)
+## Staged Review Prompt (Round 1)
 ```
 ## Your Role
-You are Codex acting as an equal peer reviewer of commit messages. Another reviewer (Claude) is independently analyzing the same commits — you will debate afterward.
+You are Codex acting as an equal peer reviewer of code changes. Another reviewer (Claude) is independently analyzing the same changes — you will debate afterward.
 
 ## Task
 {USER_REQUEST}
@@ -53,21 +52,21 @@ You are Codex acting as an equal peer reviewer of commit messages. Another revie
 ## Session Context
 {SESSION_CONTEXT}
 
-## Commit Message to Review
-{COMMIT_MESSAGES}
+## Files Changed
+{FILES_CHANGED}
 
 ## How to Inspect Changes
-Run `{DIFF_CONTEXT}` to read the staged diff. Verify the message accurately describes the changes.
+Run `{DIFF_CONTEXT}` to read the staged diff. Review the actual code changes for quality issues.
 
-## Project Conventions
-{PROJECT_CONVENTIONS}
+## Project Context
+{PROJECT_CONTEXT}
 
 ## Instructions
-1. Focus on message quality only — do NOT review code correctness.
-2. Read the staged diff to verify message accuracy and scope.
-3. Check: clarity, convention compliance, scope accuracy, structure.
-4. Verify message claims match the actual diff.
-5. Focus on identifying problems and their impact — do NOT suggest fixes.
+1. Focus on code quality: bugs, edge cases, security vulnerabilities, performance issues, maintainability problems.
+2. Read the staged diff thoroughly. Check every changed file.
+3. For each issue found, specify the exact file and line range.
+4. Commit message quality is secondary — only flag if egregiously bad.
+5. Provide a suggested fix description (NOT a patch) for each issue.
 6. Use EXACT output format below.
 
 ## Required Output Format
@@ -77,7 +76,7 @@ Run `{DIFF_CONTEXT}` to read the staged diff. Verify the message accurately desc
 ## Last Review Prompt (Round 1)
 ```
 ## Your Role
-You are Codex acting as an equal peer reviewer of commit messages. Another reviewer (Claude) is independently analyzing the same commits — you will debate afterward.
+You are Codex acting as an equal peer reviewer of code changes. Another reviewer (Claude) is independently analyzing the same changes — you will debate afterward.
 
 ## Task
 {USER_REQUEST}
@@ -88,55 +87,56 @@ You are Codex acting as an equal peer reviewer of commit messages. Another revie
 ## Commits to Review
 {COMMIT_LIST}
 
-## Commit Messages
-{COMMIT_MESSAGES}
+## Files Changed
+{FILES_CHANGED}
 
 ## How to Inspect Changes
 - For each commit, run `git show <SHA>` to see its individual diff.
 - Also run `{DIFF_CONTEXT}` for aggregate diff context.
-- Verify each message accurately describes its commit's changes.
+- Review the actual code changes for quality issues.
 
-## Project Conventions
-{PROJECT_CONVENTIONS}
+## Project Context
+{PROJECT_CONTEXT}
 
 ## Instructions
-1. Focus on message quality only — do NOT review code correctness.
+1. Focus on code quality: bugs, edge cases, security vulnerabilities, performance issues, maintainability problems.
 2. Inspect EACH commit's diff individually — do not rely on aggregate diff alone.
-3. Check: clarity, convention compliance, scope accuracy, structure.
-4. Verify each message's claims match its actual diff.
+3. For each issue found, specify the exact file and line range.
+4. Commit message quality is secondary — only flag if egregiously bad.
 5. In Evidence field, always reference the specific commit SHA and subject.
-6. Focus on identifying problems and their impact — do NOT suggest fixes.
+6. Provide a suggested fix description (NOT a patch) for each issue.
 7. Use EXACT output format below.
 
 ## Required Output Format
 {OUTPUT_FORMAT}
 ```
 
-## Claude Independent Analysis Prompt — Draft mode
+## Claude Independent Analysis Prompt — Staged mode
 ```
 ## Your Task
-You are reviewing commit message(s) independently. Codex is reviewing the same commits separately — you will NOT see their findings until later.
+You are reviewing code changes independently. Codex is reviewing the same changes separately — you will NOT see their findings until later.
 
 ## INFORMATION BARRIER
 - Do NOT read $SESSION_DIR/review.md or any Codex output.
-- Form your OWN conclusions based on the diff and message text.
+- Form your OWN conclusions based on the diff and code.
 - Commit to specific positions.
 
-## Commit Message to Review
-{COMMIT_MESSAGES}
+## Files Changed
+{FILES_CHANGED}
 
 ## How to Inspect Changes
-Run `{DIFF_CONTEXT}` to read the staged diff. Verify the message accurately describes the changes.
+Run `{DIFF_CONTEXT}` to read the staged diff. Review the actual code changes for quality issues.
 
-## Project Conventions
-{PROJECT_CONVENTIONS}
+## Project Context
+{PROJECT_CONTEXT}
 
 ## Instructions
-1. Focus on message quality only — do NOT review code correctness.
-2. Read the diff to verify message accuracy and scope.
-3. Check: clarity, convention compliance, scope accuracy, structure.
-4. Identify problems — do NOT suggest fixes.
-5. Write in the required format below.
+1. Focus on code quality: bugs, edge cases, security vulnerabilities, performance issues, maintainability problems.
+2. Read the diff thoroughly. Check every changed file.
+3. For each finding, specify the exact file and line range.
+4. Commit message quality is secondary — only flag if egregiously bad.
+5. Provide a suggested fix description (NOT a patch) for each finding.
+6. Write in the required format below.
 
 ## Required Output Format
 {CLAUDE_ANALYSIS_FORMAT}
@@ -145,46 +145,47 @@ Run `{DIFF_CONTEXT}` to read the staged diff. Verify the message accurately desc
 ## Claude Independent Analysis Prompt — Last mode
 ```
 ## Your Task
-You are reviewing commit message(s) independently. Codex is reviewing the same commits separately — you will NOT see their findings until later.
+You are reviewing code changes independently. Codex is reviewing the same changes separately — you will NOT see their findings until later.
 
 ## INFORMATION BARRIER
 - Do NOT read $SESSION_DIR/review.md or any Codex output.
-- Form your OWN conclusions based on the diff and message text.
+- Form your OWN conclusions based on the diff and code.
 - Commit to specific positions.
 
 ## Commits to Review
 {COMMIT_LIST}
 
-## Commit Messages
-{COMMIT_MESSAGES}
+## Files Changed
+{FILES_CHANGED}
 
 ## How to Inspect Changes
 - For each commit, run `git show <SHA>` to see its individual diff.
 - Also run `{DIFF_CONTEXT}` for aggregate diff context.
-- Verify each message accurately describes its commit's changes.
+- Review the actual code changes for quality issues.
 
-## Project Conventions
-{PROJECT_CONVENTIONS}
+## Project Context
+{PROJECT_CONTEXT}
 
 ## Instructions
-1. Focus on message quality only — do NOT review code correctness.
+1. Focus on code quality: bugs, edge cases, security vulnerabilities, performance issues, maintainability problems.
 2. Inspect EACH commit's diff individually — do not rely on aggregate diff alone.
-3. Check: clarity, convention compliance, scope accuracy, structure.
-4. In Evidence field, always reference the specific commit SHA and subject.
-5. Identify problems — do NOT suggest fixes.
-6. Write in the required format below.
+3. For each finding, specify the exact file and line range.
+4. Commit message quality is secondary — only flag if egregiously bad.
+5. In Evidence field, always reference the specific commit SHA and subject.
+6. Provide a suggested fix description (NOT a patch) for each finding.
+7. Write in the required format below.
 
 ## Required Output Format
 {CLAUDE_ANALYSIS_FORMAT}
 ```
 
-## Response Prompt — Draft mode (Round 2+)
+## Response Prompt — Staged mode (Round 2+)
 ```
 ## Session Context
 {SESSION_CONTEXT}
 
-## Project Conventions
-{PROJECT_CONVENTIONS}
+## Project Context
+{PROJECT_CONTEXT}
 
 ## Points We Agree On
 {AGREED_POINTS}
@@ -200,8 +201,8 @@ You are reviewing commit message(s) independently. Codex is reviewing the same c
 
 ## Instructions
 1. Re-read the staged diff: run `{DIFF_CONTEXT}`.
-2. Address disagreements with evidence from the diff.
-3. Do NOT suggest fixes — focus on whether the problem exists.
+2. Address disagreements with evidence from the code.
+3. Provide suggested fixes for agreed issues — NOT patches.
 4. Keep ISSUE-{N} numbering stable. New findings use the next available number.
 5. Use EXACT output format. You MUST include a VERDICT block.
 
@@ -214,8 +215,8 @@ You are reviewing commit message(s) independently. Codex is reviewing the same c
 ## Session Context
 {SESSION_CONTEXT}
 
-## Project Conventions
-{PROJECT_CONVENTIONS}
+## Project Context
+{PROJECT_CONTEXT}
 
 ## Commits in Scope
 {COMMIT_LIST}
@@ -234,9 +235,9 @@ You are reviewing commit message(s) independently. Codex is reviewing the same c
 
 ## Instructions
 1. Re-read each commit's diff: run `git show <SHA>` for each commit in the review. Also run `{DIFF_CONTEXT}` for aggregate context.
-2. Address disagreements with evidence from the diff.
+2. Address disagreements with evidence from the code.
 3. In Evidence, always reference specific commit SHA and subject.
-4. Do NOT suggest fixes — focus on whether the problem exists.
+4. Provide suggested fixes for agreed issues — NOT patches.
 5. Keep ISSUE-{N} numbering stable. New findings use the next available number.
 6. Use EXACT output format. You MUST include a VERDICT block.
 

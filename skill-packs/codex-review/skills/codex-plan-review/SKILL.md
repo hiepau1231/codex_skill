@@ -13,45 +13,133 @@ After creating a plan but before implementing code. Reviews plan quality — not
 
 ## Prerequisites
 - A Markdown plan file exists (e.g. `plan.md`) with headings for sections, steps, or phases.
-- `codex` CLI is installed and authenticated.
-- `codex-review` skill pack is installed (`npx github:lploc94/codex_skill`).
 
 ## Runner
 
 ```bash
 RUNNER="{{RUNNER_PATH}}"
+SKILLS_DIR="{{SKILLS_DIR}}"
+json_esc() { printf '%s' "$1" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>process.stdout.write(JSON.stringify(d)))'; }
 ```
 
+## Stdin Format Rules
+- **JSON** → `render`/`finalize`: heredoc. Literal-only → `<<'RENDER_EOF'`. Dynamic vars → escape with `json_esc`, use `<<RENDER_EOF` (unquoted).
+- **json_esc output includes quotes** → embed directly: `{"KEY":$(json_esc "$VAL")}`.
+- **Plain text** → `start`/`resume`: `printf '%s' "$PROMPT" | node "$RUNNER" ...` — NEVER `echo`.
+- **NEVER** `echo '{...}'` for JSON. Forbidden: NULL bytes (`\x00`).
+
 ## Workflow
-1. **Collect inputs**: Auto-detect context and announce defaults before asking anything.
-   - **plan-path**: Scan CWD for `plan.md`, `PLAN.md`; also search `docs/` up to 3 levels for `*plan*.md`. If single match → use it. If multiple → list and ask user. If none → ask user for path.
-   - **effort**: Default `high` for plan review (plans typically cover significant scope).
-   - Announce detected plan path and effort. Proceeding — reply to override.
-   - Set `PLAN_PATH` and `EFFORT`. Block only if plan file cannot be found or resolved.
-2. Run pre-flight checks (see `references/workflow.md` §1.5).
-3. Build prompt from `references/prompts.md` (`Plan Review Prompt`), following the Placeholder Injection Guide.
-4. Start round 1: `node "$RUNNER" init --skill-name codex-plan-review --working-dir "$PWD"` to create session, then `node "$RUNNER" start "$SESSION_DIR" --effort "$EFFORT"`.
-5. Poll with adaptive intervals (Round 1: 60s/60s/30s/15s..., Round 2+: 30s/15s...). After each poll, report **specific activities** from poll output (e.g. which files Codex is reading, what topic it is analyzing). See `references/workflow.md` for parsing guide. NEVER report generic "Codex is running" — always extract concrete details.
-6. Parse Codex issues (`ISSUE-{N}` + `VERDICT`) using `references/output-format.md`.
-7. Apply valid fixes to the plan, **save the plan file**, rebut invalid points, and resume with `node "$RUNNER" resume "$SESSION_DIR"`.
-8. Repeat until `APPROVE`, stalemate, or hard cap (5 rounds).
-9. Return final debate summary, residual risks, and final plan path.
 
-### Effort Level Guide
-| Level    | Depth             | Best for                        | Typical time |
-|----------|-------------------|---------------------------------|--------------|
-| `low`    | Surface check     | Quick sanity check              | ~2-3 min     |
-| `medium` | Standard review   | Most day-to-day work            | ~5-8 min     |
-| `high`   | Deep analysis     | Important features              | ~10-15 min   |
-| `xhigh`  | Exhaustive        | Critical/security-sensitive     | ~20-30 min   |
+### 1. Collect Inputs
+Auto-detect context and announce defaults before asking anything.
 
-## Required References
-- Detailed execution steps: `references/workflow.md`
-- Prompt templates: `references/prompts.md`
-- Output contract: `references/output-format.md`
+**Plan-path detection:**
+```bash
+PLAN_ROOT=$(ls plan.md PLAN.md 2>/dev/null)
+PLAN_DOCS=$(find ./docs -maxdepth 3 -name "*plan*.md" 2>/dev/null | head -5)
+ALL="$([ -n "$PLAN_ROOT" ] && echo "$PLAN_ROOT")
+$PLAN_DOCS"
+COUNT=$(echo "$ALL" | grep -v '^$' | wc -l)
+if [ "$COUNT" -eq 1 ]; then PLAN_PATH=$(echo "$ALL" | grep -v '^$')
+elif [ "$COUNT" -gt 1 ]; then echo "Multiple plan files found: $ALL"  # ask user
+else PLAN_PATH=""  # ask user for path
+fi
+```
+
+**Effort**: Default `high` for plan review.
+
+Announce: `"Detected: plan=$PLAN_PATH, effort=high. Proceeding — reply to override."` Block only if plan file cannot be found.
+
+**Inputs**: plan file path (absolute, `.md`), user request (default "Review this plan for quality and completeness"), session context (constraints, assumptions, tech stack), acceptance criteria (user-provided or derived from plan), effort level.
+
+### 2. Pre-flight Checks
+1. Read plan file and verify it is Markdown: must have `.md` extension AND contain at least one heading (`#`). Fail-fast if unreadable.
+2. If acceptance criteria not provided, derive from plan: scan for headings like "Goals", "Outcomes", "Success criteria" and extract content.
+
+### 3. Init Session
+```bash
+INIT_OUTPUT=$(node "$RUNNER" init --skill-name codex-plan-review --working-dir "$PWD")
+SESSION_DIR=${INIT_OUTPUT#CODEX_SESSION:}
+```
+Validate: `INIT_OUTPUT` must start with `CODEX_SESSION:`.
+
+### 4. Render Prompt
+```bash
+PROMPT=$(node "$RUNNER" render --skill codex-plan-review --template round1 --skills-dir "$SKILLS_DIR" <<RENDER_EOF
+{"PLAN_PATH":$(json_esc "$PLAN_PATH"),"USER_REQUEST":$(json_esc "$USER_REQUEST"),"SESSION_CONTEXT":$(json_esc "$SESSION_CONTEXT"),"ACCEPTANCE_CRITERIA":$(json_esc "$ACCEPTANCE_CRITERIA")}
+RENDER_EOF
+)
+```
+
+**Placeholder values**: `PLAN_PATH` = absolute path to plan file; `USER_REQUEST` = user's task description; `SESSION_CONTEXT` = structured context block; `ACCEPTANCE_CRITERIA` = derived or user-provided criteria.
+
+### 5. Start Round 1
+```bash
+printf '%s' "$PROMPT" | node "$RUNNER" start "$SESSION_DIR" --effort "$EFFORT"
+```
+Validate JSON: `{"status":"started","round":1}`. Error with `CODEX_NOT_FOUND` → tell user to install codex.
+
+### 6. Poll
+```bash
+POLL_JSON=$(node "$RUNNER" poll "$SESSION_DIR")
+```
+**Poll intervals**: Round 1: 60s, 60s, 30s, 15s+. Round 2+: 30s, 15s+.
+
+Report **specific activities** from `activities` array (e.g. "Codex [45s]: reading plan.md, analyzing section 3 structure"). NEVER report generic "Codex is running".
+
+Continue while `status === "running"`. Stop on `completed|failed|timeout|stalled`.
+
+### 7. Apply/Rebut
+Parse issues from `poll_json.review.blocks[]` — each has `id`, `title`, `severity`, `category`, `location`, `problem`, `evidence`, `suggested_fix`. Verdict in `review.verdict.status`. Fallback: `review.raw_markdown`.
+
+- **Valid issues**: apply fixes directly to the plan file, **save the plan file** before resuming — Codex re-reads from the plan path.
+- **Invalid issues**: rebut with concrete proof (reasoning, references, behavior).
+
+### 8. Render Rebuttal + Resume
+```bash
+PROMPT=$(node "$RUNNER" render --skill codex-plan-review --template rebuttal --skills-dir "$SKILLS_DIR" <<RENDER_EOF
+{"PLAN_PATH":$(json_esc "$PLAN_PATH"),"SESSION_CONTEXT":$(json_esc "$SESSION_CONTEXT"),"FIXED_ITEMS":$(json_esc "$FIXED_ITEMS"),"DISPUTED_ITEMS":$(json_esc "$DISPUTED_ITEMS")}
+RENDER_EOF
+)
+```
+
+Resume: `printf '%s' "$PROMPT" | node "$RUNNER" resume "$SESSION_DIR" --effort "$EFFORT"` → validate JSON. **Go back to step 6 (Poll).** Repeat 6→7→8 until APPROVE, stalemate, or 5 rounds.
+
+### 9. Completion + Stalemate
+- `review.verdict.status === "APPROVE"` → done.
+- `poll_json.convergence.stalemate === true` → present deadlocked issues (from `convergence.unchanged_issue_ids`) with both sides' arguments. Round < 5 → ask user; round 5 → force final synthesis.
+- **Hard cap: 5 rounds.** Force final synthesis with unresolved issues as residual risks.
+
+### 10. Final Output
+
+| Metric | Value |
+|--------|-------|
+| Rounds | {N} |
+| Verdict | {APPROVE/REVISE/STALEMATE} |
+| Issues Found | {total} |
+| Issues Fixed | {fixed_count} |
+| Issues Disputed | {disputed_count} |
+
+Present: accepted issues and plan edits made, disputed issues with reasoning from both sides, residual risks and unresolved assumptions, recommended next steps before implementation, final plan path.
+
+### 11. Finalize + Cleanup
+```bash
+node "$RUNNER" finalize "$SESSION_DIR" <<'FINALIZE_EOF'
+{"verdict":"..."}
+FINALIZE_EOF
+```
+Optionally include `"issues":{"total_found":N,"total_fixed":N,"total_disputed":N}`. Report `$SESSION_DIR` path.
+
+```bash
+node "$RUNNER" stop "$SESSION_DIR"
+```
+**Always run cleanup**, even on failure/timeout.
+
+**Errors**: Poll `failed` → retry once; `timeout`/`stalled` → report partial results from `review.raw_markdown`, suggest lower effort; `error` → report to user. Start/resume `error` with `CODEX_NOT_FOUND` → tell user to install codex. Always run cleanup.
 
 ## Rules
 - If Claude Code plan mode is active, stay in plan mode during the debate. Otherwise, operate normally.
 - Do not implement code in this skill.
 - Do not claim consensus without explicit `VERDICT: APPROVE` or user-accepted stalemate.
 - Preserve traceability: each accepted issue maps to a concrete plan edit.
+- **Runner manages all session state** — do NOT manually read/write `rounds.json`, `meta.json`, or `prompt.txt` in the session directory.

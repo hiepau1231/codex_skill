@@ -14,42 +14,166 @@ After writing code, before committing. Use for uncommitted working-tree changes 
 ## Prerequisites
 - **Working-tree mode** (default): working tree has staged or unstaged changes.
 - **Branch mode**: current branch differs from base branch (has commits not in base).
-- `codex` CLI is installed and authenticated.
-- `codex-review` skill pack is installed (`npx github:lploc94/codex_skill`).
 
 ## Runner
 
 ```bash
 RUNNER="{{RUNNER_PATH}}"
+SKILLS_DIR="{{SKILLS_DIR}}"
+json_esc() { printf '%s' "$1" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>process.stdout.write(JSON.stringify(d)))'; }
 ```
 
+## Stdin Format Rules
+- **JSON** → `render`/`finalize`: heredoc. Literal-only → `<<'RENDER_EOF'`. Dynamic vars → escape with `json_esc`, use `<<RENDER_EOF` (unquoted).
+- **json_esc output includes quotes** → embed directly: `{"KEY":$(json_esc "$VAL")}`.
+- **Plain text** → `start`/`resume`: `printf '%s' "$PROMPT" | node "$RUNNER" ...` — NEVER `echo`.
+- **NEVER** `echo '{...}'` for JSON. Forbidden: NULL bytes (`\x00`).
+
 ## Workflow
-1. **Collect inputs**: Auto-detect context and announce defaults before asking anything.
-   - **scope** (detected first): Run `git status --short | grep -v '^??'` — non-empty output → `working-tree`. Else run `git rev-list @{u}..HEAD` — non-empty → `branch`. If both conditions true, use `working-tree`. If neither, ask user.
-   - **effort** (adapts to detected scope): If scope=`branch`, count `git diff --name-only @{u}..HEAD`; else count `git diff --name-only`. Result <10 → `medium`, 10–50 → `high`, >50 → `xhigh`; default `high` if undetectable.
-   - Announce: "Detected: scope=`$SCOPE`, effort=`$EFFORT` (N files changed). Proceeding — reply to override scope, effort, or both."
-   - Set `SCOPE` and `EFFORT`. Only block for inputs that remain undetectable.
-2. Run pre-flight checks (see `references/workflow.md` §1.5).
-3. Build prompt from `references/prompts.md` (Working Tree or Branch Review Prompt), following the Placeholder Injection Guide.
-4. Start round 1: `node "$RUNNER" init --skill-name codex-impl-review --working-dir "$PWD"` to create session, then `node "$RUNNER" start "$SESSION_DIR" --effort "$EFFORT"`.
-5. Poll with adaptive intervals (Round 1: 60s/60s/30s/15s..., Round 2+: 30s/15s...). After each poll, report **specific activities** from poll output (e.g. which files Codex is reading, what topic it is analyzing). See `references/workflow.md` for parsing guide. NEVER report generic "Codex is running" — always extract concrete details.
-6. Parse issue list with `references/output-format.md`.
-7. Fix valid issues in code; rebut invalid findings with evidence.
-8. Resume debate via `node "$RUNNER" resume "$SESSION_DIR"` until `APPROVE`, stalemate, or hard cap (5 rounds).
-9. Return final review summary, residual risks, and recommended next steps.
 
-### Effort Level Guide
-| Level    | Depth             | Best for                        | Typical time |
-|----------|-------------------|---------------------------------|-------------|
-| `low`    | Surface check     | Quick sanity check              | ~2-3 min |
-| `medium` | Standard review   | Most day-to-day work            | ~5-8 min |
-| `high`   | Deep analysis     | Important features              | ~10-15 min |
-| `xhigh`  | Exhaustive        | Critical/security-sensitive     | ~20-30 min |
+### 1. Collect Inputs
+Auto-detect context and announce defaults before asking anything.
 
-## Required References
-- Detailed execution: `references/workflow.md`
-- Prompt templates: `references/prompts.md`
-- Output contract: `references/output-format.md`
+**Scope detection (FIRST):**
+```bash
+HAS_WORKING_CHANGES=$(git status --short 2>/dev/null | grep -v '^??' | wc -l)
+HAS_BRANCH_COMMITS=$(git rev-list @{u}..HEAD 2>/dev/null | wc -l)
+if [ "$HAS_WORKING_CHANGES" -gt 0 ]; then SCOPE="working-tree"
+elif [ "$HAS_BRANCH_COMMITS" -gt 0 ]; then SCOPE="branch"
+else SCOPE=""  # ask user
+fi
+```
+
+**Effort detection (adapts to scope):**
+```bash
+if [ "$SCOPE" = "branch" ]; then
+  FILES_CHANGED=$(git diff --name-only @{u}..HEAD 2>/dev/null | wc -l)
+else
+  FILES_CHANGED=$(git diff --name-only 2>/dev/null | wc -l)
+fi
+if [ "$FILES_CHANGED" -lt 10 ]; then EFFORT="medium"
+elif [ "$FILES_CHANGED" -lt 50 ]; then EFFORT="high"
+else EFFORT="xhigh"
+fi
+EFFORT=${EFFORT:-high}
+```
+
+Announce: `"Detected: scope=$SCOPE, effort=$EFFORT (N files changed). Proceeding — reply to override."` Only block if both detection methods return 0.
+
+**Working-tree mode inputs**: working dir path, user request, uncommitted changes (`git status`, `git diff`, `git diff --cached`), optional plan file.
+
+**Branch mode inputs**:
+- Base branch: ask user, fallback `main` → `master` → remote HEAD. Validate: `git rev-parse --verify <base>`.
+- Clean working tree required: `git diff --quiet && git diff --cached --quiet`. If dirty → commit/stash or switch to working-tree mode.
+- Stale base warning: recommend `git fetch origin <base>` if base is local-only.
+- Branch diff: `git diff <base>...HEAD`, commit log: `git log <base>..HEAD --oneline`.
+
+### 2. Pre-flight Checks
+- **Working-tree**: `git diff --quiet && git diff --cached --quiet` must FAIL (exit 1). If both succeed → no changes, stop.
+- **Branch**: `git diff <base>...HEAD --quiet` must FAIL. If no diff → stop.
+
+### 3. Init Session
+```bash
+INIT_OUTPUT=$(node "$RUNNER" init --skill-name codex-impl-review --working-dir "$PWD")
+SESSION_DIR=${INIT_OUTPUT#CODEX_SESSION:}
+```
+Validate: `INIT_OUTPUT` must start with `CODEX_SESSION:`.
+
+### 4. Render Prompt
+
+**Working-tree mode** (template `working-tree-round1`):
+```bash
+PROMPT=$(node "$RUNNER" render --skill codex-impl-review --template working-tree-round1 --skills-dir "$SKILLS_DIR" <<RENDER_EOF
+{"USER_REQUEST":$(json_esc "$USER_REQUEST"),"SESSION_CONTEXT":$(json_esc "$SESSION_CONTEXT")}
+RENDER_EOF
+)
+```
+
+**Branch mode** (template `branch-round1`):
+```bash
+PROMPT=$(node "$RUNNER" render --skill codex-impl-review --template branch-round1 --skills-dir "$SKILLS_DIR" <<RENDER_EOF
+{"USER_REQUEST":$(json_esc "$USER_REQUEST"),"SESSION_CONTEXT":$(json_esc "$SESSION_CONTEXT"),"BASE_BRANCH":$(json_esc "$BASE_BRANCH")}
+RENDER_EOF
+)
+```
+
+**Placeholder values**: `USER_REQUEST` = user's task description (default "Review uncommitted changes for correctness and quality"); `SESSION_CONTEXT` = structured context block; `BASE_BRANCH` = validated base branch (branch mode only).
+
+### 5. Start Round 1
+```bash
+printf '%s' "$PROMPT" | node "$RUNNER" start "$SESSION_DIR" --effort "$EFFORT"
+```
+Validate JSON: `{"status":"started","round":1}`. Error with `CODEX_NOT_FOUND` → tell user to install codex.
+
+### 6. Poll
+```bash
+POLL_JSON=$(node "$RUNNER" poll "$SESSION_DIR")
+```
+**Poll intervals**: Round 1: 60s, 60s, 30s, 15s+. Round 2+: 30s, 15s+.
+
+Report **specific activities** from `activities` array (e.g. "Codex [45s]: reading src/auth.js, analyzing auth flow"). NEVER report generic "Codex is running".
+
+Continue while `status === "running"`. Stop on `completed|failed|timeout|stalled`.
+
+### 7. Apply/Rebut
+Parse issues from `poll_json.review.blocks[]` — each has `id`, `title`, `severity`, `category`, `location`, `problem`, `evidence`, `suggested_fix`. Verdict in `review.verdict.status`. Fallback: `review.raw_markdown`.
+
+- **Valid issues**: edit code, record fix evidence.
+- **Invalid issues**: rebut with concrete proof (paths, tests, behavior).
+- **Branch mode only**: commit fixes (`git add` + `git commit`) before resuming — Codex reads `git diff <base>...HEAD` which only shows committed changes.
+- **Verify fixes**: run relevant tests, typecheck, or document manual evidence. Never claim fixed without verification.
+
+### 8. Render Rebuttal + Resume
+
+**Working-tree** (template `rebuttal-working-tree`):
+```bash
+PROMPT=$(node "$RUNNER" render --skill codex-impl-review --template rebuttal-working-tree --skills-dir "$SKILLS_DIR" <<RENDER_EOF
+{"USER_REQUEST":$(json_esc "$USER_REQUEST"),"SESSION_CONTEXT":$(json_esc "$SESSION_CONTEXT"),"FIXED_ITEMS":$(json_esc "$FIXED_ITEMS"),"DISPUTED_ITEMS":$(json_esc "$DISPUTED_ITEMS")}
+RENDER_EOF
+)
+```
+
+**Branch** (template `rebuttal-branch`):
+```bash
+PROMPT=$(node "$RUNNER" render --skill codex-impl-review --template rebuttal-branch --skills-dir "$SKILLS_DIR" <<RENDER_EOF
+{"USER_REQUEST":$(json_esc "$USER_REQUEST"),"SESSION_CONTEXT":$(json_esc "$SESSION_CONTEXT"),"FIXED_ITEMS":$(json_esc "$FIXED_ITEMS"),"DISPUTED_ITEMS":$(json_esc "$DISPUTED_ITEMS"),"BASE_BRANCH":$(json_esc "$BASE_BRANCH")}
+RENDER_EOF
+)
+```
+
+Resume: `printf '%s' "$PROMPT" | node "$RUNNER" resume "$SESSION_DIR" --effort "$EFFORT"` → validate JSON. **Go back to step 6 (Poll).** Repeat 6→7→8 until APPROVE, stalemate, or 5 rounds.
+
+### 9. Completion + Stalemate
+- `review.verdict.status === "APPROVE"` → done.
+- `poll_json.convergence.stalemate === true` → present deadlocked issues (from `convergence.unchanged_issue_ids`) with both sides' arguments. Round < 5 → ask user; round 5 → force final synthesis.
+- **Hard cap: 5 rounds.** Force final synthesis with unresolved issues as residual risks.
+
+### 10. Final Output
+
+| Metric | Value |
+|--------|-------|
+| Rounds | {N} |
+| Verdict | {APPROVE/REVISE/STALEMATE} |
+| Issues Found | {total} |
+| Issues Fixed | {fixed_count} |
+| Issues Disputed | {disputed_count} |
+
+Present: fixed defects by severity, disputed items with rationale, residual risks, recommended next steps.
+
+### 11. Finalize + Cleanup
+```bash
+node "$RUNNER" finalize "$SESSION_DIR" <<'FINALIZE_EOF'
+{"verdict":"...","scope":"..."}
+FINALIZE_EOF
+```
+Optionally include `"issues":{"total_found":N,"total_fixed":N,"total_disputed":N}`. Report `$SESSION_DIR` path.
+
+```bash
+node "$RUNNER" stop "$SESSION_DIR"
+```
+**Always run cleanup**, even on failure/timeout.
+
+**Errors**: Poll `failed` → retry once; `timeout`/`stalled` → report partial results from `review.raw_markdown`, suggest lower effort; `error` → report to user. Start/resume `error` with `CODEX_NOT_FOUND` → tell user to install codex. Always run cleanup.
 
 ## Rules
 - If invoked during Claude Code plan mode, exit plan mode first — this skill requires code editing.
@@ -57,3 +181,4 @@ RUNNER="{{RUNNER_PATH}}"
 - Preserve functional intent unless fix requires behavior change.
 - Every accepted issue must map to a concrete code diff.
 - If stalemate persists, present both sides and defer to user.
+- **Runner manages all session state** — do NOT manually read/write `rounds.json`, `meta.json`, or `prompt.txt` in the session directory.

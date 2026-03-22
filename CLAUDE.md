@@ -8,7 +8,7 @@ This repository provides a single-command installer (`npx github:lploc94/codex_s
 - `/codex-plan-review` — debate plans before implementation
 - `/codex-impl-review` — review uncommitted or branch changes before commit/merge
 - `/codex-think-about` — peer reasoning/debate on technical topics
-- `/codex-commit-review` — review commit messages for clarity and conventions
+- `/codex-commit-review` — review committed code quality before push (report + suggest)
 - `/codex-pr-review` — review PRs (branch diff, commit hygiene, description)
 - `/codex-parallel-review` — parallel independent review by both Claude and Codex, then debate
 - `/codex-codebase-review` — chunked full-codebase review for large projects (50-500+ files)
@@ -113,7 +113,10 @@ skill-packs/codex-review/
 ├── codex-parallel-review/
 │   ├── SKILL.md
 │   └── references/
-└── codex-codebase-review/
+├── codex-codebase-review/
+│   ├── SKILL.md
+│   └── references/
+└── codex-security-review/
     ├── SKILL.md
     └── references/
 ```
@@ -122,23 +125,43 @@ skill-packs/codex-review/
 
 1. **Skill invocation** (`/codex-plan-review`, `/codex-impl-review`, `/codex-think-about`, `/codex-commit-review`, `/codex-pr-review`, `/codex-parallel-review`, `/codex-codebase-review`, or `/codex-security-review`) follows SKILL.md step-by-step
 2. **Runner path**: SKILL.md contains hardcoded absolute path to `codex-runner.js`
-3. **codex-runner.js** spawns `codex exec --json --sandbox read-only` as a detached process, polls JSONL output
-4. **Review debate loop** (plan-review, impl-review, commit-review, pr-review): Claude Code parses Codex's `ISSUE-{N}` review → fixes/rebuts → resumes via `resume` command → repeats until `APPROVE` verdict or stalemate
-5. **Peer debate loop** (think-about): Claude Code and Codex think independently → discuss → exchange perspectives → repeat until consensus or stalemate → present to user
-6. **Parallel review loop** (parallel-review): Claude and Codex review independently in parallel → merge findings → debate disagreements → produce consensus report
-7. **Chunked codebase review** (codebase-review): split codebase into module chunks → review each chunk in independent Codex session → Claude synthesizes cross-cutting findings
-8. **Security review** (security-review): OWASP Top 10 + CWE pattern detection → Codex analyzes security-sensitive code → Claude validates findings and produces security report
+3. **Prompt rendering**: SKILL.md calls `render --skill X --template Y --skills-dir $SKILLS_DIR` with JSON vars on stdin → receives rendered prompt on stdout
+4. **Session lifecycle**: `init` → `start` (stdin prompt) → `poll` (JSON response) → `resume` (stdin prompt) → `poll` → ... → `finalize` → `stop`
+5. **codex-runner.js** spawns `codex exec --json --sandbox read-only` as a detached process, polls JSONL output, parses markdown into structured JSON
+6. **Review debate loop** (plan-review, impl-review, commit-review, pr-review): Claude reads `poll` JSON → `review.blocks[].id` ISSUE-{N} → fixes/rebuts → `render` rebuttal → `resume` → repeats until `APPROVE` or stalemate
+7. **Peer debate loop** (think-about): Claude and Codex think independently → compare JSON responses → exchange perspectives → repeat until consensus or stalemate → present to user
+8. **Parallel review loop** (parallel-review): Claude agents and Codex review independently in parallel → merge findings → debate disagreements → produce consensus report
+9. **Chunked codebase review** (codebase-review): split codebase into module chunks → review each chunk in independent Codex session → Claude synthesizes cross-cutting findings
+10. **Security review** (security-review): OWASP Top 10 + CWE pattern detection → Codex analyzes security-sensitive code → Claude validates findings and produces security report
+11. **All state managed by runner**: Claude NEVER writes directly to session dir. `rounds.json`, `meta.json`, `prompt.txt`, JSONL archival all handled by runner commands.
 
 ### Key Design Decisions
 
 - **Node.js runner**: `codex-runner.js` uses Node.js stdlib only — no Python/bash dependency
 - **Cross-platform**: Works on Windows, macOS, and Linux
+- **JSON-only output**: All commands return structured JSON (except `version`, `init`, `render`). No text protocol parsing needed.
+- **Built-in output parsers**: Runner parses Codex markdown into structured blocks (ISSUE, CROSS, RESPONSE, think-about format) with variant detection
+- **Prompt template engine**: `render` command reads `prompts.md`, resolves placeholders, auto-injects output format
 - **Prompt minimalism**: Prompts contain only file paths and context; Codex reads files/diffs itself
 - **Structured output**: Review skills use `ISSUE-{N}` format with `VERDICT` block; think-about uses Key Insights / Considerations / Recommendations
 - **Thread persistence**: `init` creates a session; `start` begins round 1; `resume` continues with auto thread_id lookup
 - **Stalemate detection**: Stops if same points repeat for 2 consecutive rounds with no progress
 - **PID-reuse protection**: `verifyCodex()` and `verifyWatchdog()` check process cmdline before killing — prevents killing wrong process if OS reuses the PID
 - **Atomic install**: Uses staging dir + rename for safe install/update with rollback on failure
+
+### codex-runner.js Commands (v13)
+
+| Command | Input | Output |
+|---------|-------|--------|
+| `version` | (none) | Plain text: `13` |
+| `init --skill-name X --working-dir Y` | (none) | Plain text: `CODEX_SESSION:/path` |
+| `start <session_dir> [--effort] [--timeout] [--sandbox]` | Prompt on stdin | JSON: `{ status, session_dir, round }` |
+| `resume <session_dir> [--effort]` | Prompt on stdin | JSON: `{ status, session_dir, round, thread_id }` |
+| `poll <session_dir>` | (none) | JSON: `{ status, round, elapsed_seconds, review, activities }` |
+| `stop <session_dir>` | (none) | JSON: `{ status: "stopped", session_dir }` |
+| `finalize <session_dir>` | Override JSON on stdin | JSON: `{ status: "finalized", meta }` |
+| `status <session_dir>` | (none) | JSON: `{ status, session_id, rounds, ... }` |
+| `render --skill X --template Y --skills-dir Z` | Placeholder JSON on stdin | Plain text: rendered prompt |
 
 ### codex-runner.js Exit Codes
 
@@ -184,10 +207,29 @@ skill-packs/codex-review/
 - **New files**: `rounds.json` (round history), `meta.json` written to session dir.
 - **Backward compat**: `poll`/`stop` accept both old `runs/` and new `sessions/` paths. Legacy removed in v13.
 
+### v13: Runner-centric architecture (JSON-only, no backward compat)
+- **All commands output JSON** (except `version`, `init`, `render`): `start`, `resume`, `poll`, `stop`, `finalize`, `status` return structured JSON on stdout.
+- **Text protocol removed**: `POLL:status:elapsed:...` text format is gone. `poll` returns `{ status, round, elapsed_seconds, review, activities }` JSON.
+- **New commands**: `finalize` (writes `meta.json`), `status` (read-only query), `render` (prompt template engine).
+- **Runner manages all state**: Claude Code NEVER writes directly to session dir. All writes go through runner commands.
+- **Round tracking auto-managed**: Runner creates/updates `rounds.json` automatically in `start`, `resume`, `poll`, `stop`.
+- **Output parsing built-in**: Runner parses Codex markdown output into structured JSON (ISSUE blocks, VERDICT, etc.) — returned in `poll` response.
+- **Prompt template engine** (`render`): Runner reads `references/prompts.md`, resolves `{PLACEHOLDER}` from stdin JSON, auto-injects `{OUTPUT_FORMAT}` and `{CLAUDE_ANALYSIS_FORMAT}`.
+- **`init` creates subdirectories**: `prompts/` and `outputs/` created at init time for round-level archival.
+- **`start`/`resume` read prompt from stdin**: Prompt piped via stdin, runner writes `prompt.txt` + archives to `prompts/round-NNN.txt`.
+- **`resume` archives JSONL**: Previous `output.jsonl` moved to `outputs/output-round-NNN.jsonl` before new round.
+- **`finalize` replaces manual meta.json**: Aggregates timing from `rounds.json`, accepts verdict override via stdin JSON.
+- **`status` is read-only**: Reports session state without side effects.
+- **`stop` outputs JSON**: `{ status: "stopped", session_dir }` instead of silent exit.
+- **SKILL.md simplified**: ~40-60% less boilerplate. No file I/O instructions for session files. Workflow references updated to use JSON poll parsing.
+- **Installer updated**: Now injects `{{SKILLS_DIR}}` placeholder alongside `{{RUNNER_PATH}}` for `render --skills-dir`.
+- **No backward compat with v12**: Text protocol, `CODEX_STARTED:` output, manual `prompt.txt` writing, manual `rounds.json` management — all removed.
+- **manifest.json**: version `7.0.0` (major breaking)
+
 ## Verification
 
 1. `node bin/codex-skill.js` — installer chạy thành công
-2. `node skill-packs/codex-review/scripts/codex-runner.js version` — in version `12`
+2. `node skill-packs/codex-review/scripts/codex-runner.js version` — in version `13`
 3. `ls ~/.claude/skills/codex-review/` — chứa `scripts/`
 4. SKILL.md chứa absolute path, không search loop
 5. Invoke `/codex-plan-review`, `/codex-impl-review`, `/codex-think-about`, `/codex-commit-review`, `/codex-pr-review`, `/codex-parallel-review`, `/codex-codebase-review`, `/codex-security-review` trong Claude Code

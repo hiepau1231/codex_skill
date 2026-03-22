@@ -14,4 +14,13 @@ node_modules/
 # macOS
 .DS_Store
 .gitnexus
-.docs//.worktrees/
+
+# Git worktrees
+.worktrees/
+
+# Working documents (project-level, not shipped)
+SESSION_SUMMARY.md
+PROGRESS_REPORT.md
+FINAL_REPORT.md
+IMPROVEMENT_PLAN.md
+docs/superpowers/

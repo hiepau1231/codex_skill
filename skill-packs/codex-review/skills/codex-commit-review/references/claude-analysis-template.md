@@ -1,20 +1,23 @@
 # Claude Independent Analysis Template
 
-Use this exact format for Claude's independent commit message analysis.
+Use this exact format for Claude's independent code quality analysis.
 
 ```markdown
 ### FINDING-{N}: {Short title}
-- Category: clarity | convention | scope | accuracy | structure
+- Category: bug | edge-case | security | performance | maintainability | commit-message
 - Severity: low | medium | high | critical
-- Commit: {SHA and subject — required for last mode, "draft" for draft mode}
+- Commit: {SHA and subject — required for last mode, "staged" for staged mode}
+- Location: {file:line-range}
 - Problem: {clear statement}
-- Evidence: {specific text or diff reference}
-- Why it matters: {impact on readability, traceability, or team workflow}
+- Evidence: {specific code snippet or diff reference}
+- Why it matters: {impact on correctness, security, performance, or maintainability}
+- Suggested fix: {description of how to fix — NOT a patch}
 
 ### Overall Assessment
-- Quality: poor | fair | good | excellent
-- Convention compliance: yes | partial | no
-- Accuracy vs diff: accurate | partially accurate | inaccurate
+- Code quality: poor | fair | good | excellent
+- Security posture: no concerns | minor concerns | significant concerns
+- Test coverage impression: adequate | gaps identified | insufficient
+- Maintainability: poor | fair | good | excellent
 
 ### Strongest Positions
 - {positions Claude is most confident about — defend these in debate}
@@ -30,7 +33,7 @@ Claude uses `FINDING-{N}` to distinguish from Codex's `ISSUE-{N}` during cross-a
 
 When cross-analyzing in Step 4, map Claude's FINDING-{N} with Codex's ISSUE-{N}:
 
-1. **Semantic match**: Same Category + same commit/diff area referenced = match. Wording does not need to be identical — only the same underlying problem.
+1. **Semantic match**: Same Category + same code location referenced = match. Wording does not need to be identical — only the same underlying problem.
 2. **1-to-many**: If 1 FINDING maps to multiple ISSUEs (or vice versa), note the mapping explicitly (e.g., `FINDING-1 <> ISSUE-2, ISSUE-3`).
 3. **Split/merge**: If Codex splits 1 issue into 2, or merges 2 into 1, record the new mapping and keep IDs stable. Do not renumber.
 4. **Unmatched**: A FINDING or ISSUE with no counterpart is classified as "Claude-only" or "Codex-only".
