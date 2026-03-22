@@ -186,7 +186,7 @@ START_OUTPUT=$(printf '%s' "$REBUTTAL_PROMPT" | node "$RUNNER" resume "$SESSION_
 Then **go back to step 3 (Poll).** After poll completes, repeat step 4 (Apply/Rebut) and check completion criteria below. If not met, resume again (step 5). Continue this loop until a completion criterion is reached.
 
 ## 6) Completion Criteria
-- Codex returns `VERDICT: APPROVE`.
+- Codex returns `VERDICT: CONSENSUS`.
 - Or user accepts a documented stalemate.
 - **Hard cap: 5 rounds.** At cap, force final synthesis with unresolved issues listed as residual risks.
 
@@ -209,7 +209,7 @@ At stalemate:
 | Metric | Value |
 |--------|-------|
 | Rounds | {N} |
-| Verdict | {APPROVE/REVISE/STALEMATE} |
+| Verdict | {CONSENSUS/CONTINUE/STALEMATE} |
 | Issues Found | {total} |
 | Issues Fixed | {fixed_count} |
 | Issues Disputed | {disputed_count} |
