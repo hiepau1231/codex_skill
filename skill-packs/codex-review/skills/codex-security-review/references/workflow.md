@@ -109,6 +109,21 @@ START_OUTPUT=$(printf '%s' "$PROMPT" | node "$RUNNER" start "$SESSION_DIR" --eff
 **Validate init output:** Verify `INIT_OUTPUT` starts with `CODEX_SESSION:`. If not, report error.
 **Validate start output:** Verify `START_OUTPUT` starts with `CODEX_STARTED:`. If not, report error.
 
+### Phase 2, Step 2.5: Information Barrier — Claude Independent Security Analysis
+
+MUST complete before polling Codex output.
+Codex is running in background (typically 90-180s) — use this time.
+
+Using `references/claude-analysis-template.md`:
+- Read all files in scope directly (do NOT read `$SESSION_DIR/review.md`)
+- Identify top attack surfaces
+- Form an independent FINDING-{N} list using OWASP categories
+- Note high-confidence vs uncertain findings
+
+Keep analysis in working context. Do NOT write a file.
+INFORMATION BARRIER ends after Round 1 poll completes.
+From Round 2 onwards, the barrier no longer applies.
+
 ### Step 2: Poll for Progress
 
 Use adaptive polling intervals:
@@ -128,6 +143,23 @@ node "$RUNNER" poll "$SESSION_DIR"
 ### Step 3: Parse Security Findings
 
 When poll returns `POLL:completed`:
+
+### Cross-Analysis: Build FINDING↔ISSUE Mapping Table
+
+Map Claude's FINDING-{N} (from Step 2.5) against Codex's ISSUE-{N}:
+
+| Claude FINDING-{N} | Codex ISSUE-{M} | Classification |
+|--------------------|-----------------|----------------|
+| ...                | ...             | ...            |
+
+Classification options:
+- **Genuine Agreement**: Same vulnerability class + same file/line area
+- **Genuine Disagreement**: Same code area but conflicting assessment
+- **Same Direction / Different Severity**: Both flag same issue but different severity
+- **Claude-only**: Claude's finding has no Codex counterpart
+- **Codex-only**: Codex's finding has no Claude counterpart
+
+After mapping, proceed with existing finding processing below.
 
 1. Read review output from `$SESSION_DIR/review.md`
 2. Parse ISSUE-{N} blocks using regex:
