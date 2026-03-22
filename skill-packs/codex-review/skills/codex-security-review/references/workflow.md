@@ -67,6 +67,28 @@ Include:
 
 ---
 
+## Step 1.8: Assemble Prompt
+
+Build `$PROMPT` using multi-step placeholder replacement.
+DO NOT use a single sed pipeline — `output-format.md` may contain `&`, `\`, `/` characters
+that corrupt sed replacements. Use `printf '%s'` piping.
+
+a) Read `references/prompts.md` as template base
+b) Replace `{WORKING_DIR}` with current working directory
+c) Replace `{SCOPE}` with detected `$SCOPE` value
+d) Replace `{EFFORT}` with detected `$EFFORT` value
+e) Replace `{SCOPE_SPECIFIC_INSTRUCTIONS}` with the scope-specific block from prompts.md
+   matching the detected `$SCOPE` (working-tree / branch / full)
+f) Replace `{OUTPUT_FORMAT}` by reading `references/output-format.md` in full
+   using: `printf '%s' "$(cat references/output-format.md)"`
+g) Replace any remaining placeholders (`{BASE_BRANCH}` etc.)
+
+Store result as `$PROMPT`.
+
+Verify: `$PROMPT` must contain no prematurely-closed triple-backtick fences.
+
+---
+
 ## Phase 2: Round 1 - Initial Security Analysis
 
 ### Step 1: Start Codex Review
