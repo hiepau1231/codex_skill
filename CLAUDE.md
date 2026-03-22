@@ -8,7 +8,7 @@ This repository provides a single-command installer (`npx github:lploc94/codex_s
 - `/codex-plan-review` — debate plans before implementation
 - `/codex-impl-review` — review uncommitted or branch changes before commit/merge
 - `/codex-think-about` — peer reasoning/debate on technical topics
-- `/codex-commit-review` — review commit messages for clarity and conventions
+- `/codex-commit-review` — review committed code quality before push (report + suggest)
 - `/codex-pr-review` — review PRs (branch diff, commit hygiene, description)
 - `/codex-parallel-review` — parallel independent review by both Claude and Codex, then debate
 - `/codex-codebase-review` — chunked full-codebase review for large projects (50-500+ files)

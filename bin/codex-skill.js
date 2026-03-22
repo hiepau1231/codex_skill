@@ -203,7 +203,7 @@ try {
   console.log('  /codex-plan-review     — debate plans before implementation');
   console.log('  /codex-impl-review     — review uncommitted or branch changes');
   console.log('  /codex-think-about     — peer reasoning/debate');
-  console.log('  /codex-commit-review   — review commit messages');
+  console.log('  /codex-commit-review   — review committed code before push');
   console.log('  /codex-pr-review       — review PRs (branch diff + description)');
   if (fullMode) {
     console.log('  /codex-parallel-review — parallel dual-reviewer analysis + debate');
@@ -241,7 +241,7 @@ try {
         '| Plan/design document created or modified | `/codex-plan-review` | After writing plan | |',
         '| Auth, SQL, crypto, secrets, user input code | `/codex-security-review` | When security-sensitive code detected | Requires `-full` |',
         '| Large codebase (50+ files) needing review | `/codex-codebase-review` | On request for full review | Requires `-full` |',
-        '| Commit message drafted | `/codex-commit-review` | Before finalizing commit | |',
+        '| Recent commits before push | `/codex-commit-review` | After committing, before push | |',
         '| Technical question or architecture debate | `/codex-think-about` | On design discussions | |',
         '',
         '**Rules:**',

@@ -10,7 +10,7 @@ Five core skills (installed by default):
 - `/codex-plan-review` — debate implementation plans before coding
 - `/codex-impl-review` — review uncommitted or branch changes before commit/merge
 - `/codex-think-about` — peer reasoning/debate on technical topics
-- `/codex-commit-review` — review commit messages for clarity and conventions
+- `/codex-commit-review` — review committed code quality before push
 - `/codex-pr-review` — review PRs (branch diff, commit hygiene, description)
 
 Three additional skills (installed with `-full`):
@@ -63,7 +63,7 @@ After install, start Claude Code and run:
 - `/codex-plan-review` — debate implementation plans before coding
 - `/codex-impl-review` — review uncommitted or branch changes before commit/merge
 - `/codex-think-about` — peer reasoning/debate on technical topics
-- `/codex-commit-review` — review commit messages for clarity and conventions
+- `/codex-commit-review` — review committed code quality before push
 - `/codex-pr-review` — review PRs (branch diff, commit hygiene, description)
 
 **Full skills** (requires `-full` flag):

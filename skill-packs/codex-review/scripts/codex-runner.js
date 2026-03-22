@@ -944,11 +944,11 @@ const TEMPLATE_MAP = {
     "round2+": "Round 2+ Response Prompt",
   },
   "codex-commit-review": {
-    "draft-round1": "Draft Review Prompt (Round 1)",
+    "staged-round1": "Staged Review Prompt (Round 1)",
     "last-round1": "Last Review Prompt (Round 1)",
-    "claude-draft": "Claude Independent Analysis Prompt — Draft mode",
+    "claude-staged": "Claude Independent Analysis Prompt — Staged mode",
     "claude-last": "Claude Independent Analysis Prompt — Last mode",
-    "draft-round2+": "Response Prompt — Draft mode (Round 2+)",
+    "staged-round2+": "Response Prompt — Staged mode (Round 2+)",
     "last-round2+": "Response Prompt — Last mode (Round 2+)",
   },
   "codex-pr-review": {
